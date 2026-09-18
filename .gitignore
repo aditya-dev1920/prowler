@@ -136,9 +136,15 @@ ai-config.json
 *.tfstate.*
 
 # .env
+.env
+.env.*
+!.env.example
 ui/.env*
 api/.env*
 mcp_server/.env*
+
+# Nginx reverse proxy and SSL certificates
+nginx/
 
 # Coverage
 .coverage*
