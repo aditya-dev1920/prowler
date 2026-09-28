@@ -4,6 +4,7 @@
 # For development with local builds and hot-reload, use docker-compose-dev.yml instead:
 #   docker compose -f docker-compose-dev.yml up
 #
+# Environment variables can be set in a .env file in the same directory as this docker-compose.yml file.
 services:
   api-init:
     image: busybox:1.37.0@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028
@@ -12,6 +13,7 @@ services:
     command: ["sh", "-c", "chown -R 1000:1000 /data"]
     restart: "no"
 
+# The `api` service is the main backend service for the Prowler application. It runs the Django application and provides the API endpoints for the frontend and other services. The service depends on several other services, including `api-init`, `postgres`, `valkey`, and `neo4j`, ensuring that they are healthy before starting. The health check for the `api` service verifies that the application is running and accessible.
   api:
     hostname: "prowler-api"
     image: prowlercloud/prowler-api:${PROWLER_API_VERSION:-stable}
@@ -42,6 +44,7 @@ services:
       - "/home/prowler/docker-entrypoint.sh"
       - "prod"
 
+# The `ui` service is the frontend service for the Prowler application. It runs the Prowler UI, which provides a web interface for users to interact with the application. The service depends on the `mcp-server` service, ensuring that it is healthy before starting. The health check for the `ui` service verifies that the UI is running and accessible.
   ui:
     image: prowlercloud/prowler-ui:${PROWLER_UI_VERSION:-stable}
     env_file:
@@ -59,6 +62,7 @@ services:
       retries: 3
       start_period: 60s
 
+# The `postgres` service is the PostgreSQL database service for the Prowler application. It uses the official PostgreSQL Docker image and is configured with environment variables for the database user, password, and database name. The service mounts a volume for persistent data storage and exposes the PostgreSQL port for external access. The health check for the `postgres` service verifies that the database is ready to accept connections.
   postgres:
     image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
     hostname: "postgres-db"
@@ -79,6 +83,7 @@ services:
       timeout: 5s
       retries: 5
 
+# The `valkey` service is a key-value store service for the Prowler application. It uses the Valkey Docker image and is configured with environment variables for the service. The service mounts a volume for persistent data storage and exposes the Valkey port for external access. The health check for the `valkey` service verifies that the service is running and accessible.
   valkey:
     image: valkey/valkey:8-alpine@sha256:a038175878d66b9d274fbf8be73c0305e93798b83917647f167e18cef3c71eec
     hostname: "valkey"
@@ -95,6 +100,7 @@ services:
       timeout: 5s
       retries: 3
 
+# The `neo4j` service is the Neo4j graph database service for the Prowler application. It uses a specific Neo4j Docker image and is configured with environment variables for authentication, memory limits, and plugin settings. The service mounts a volume for persistent data storage and exposes the Neo4j port for external access. The health check for the `neo4j` service verifies that the database is running and accessible.
   neo4j:
     image: graphstack/dozerdb:5.26.27.0@sha256:9b54d6b3a98a76c00bd23e8e78d8c82081ff168162aebd47b25c234e092cb0a0
     hostname: "neo4j"
@@ -127,6 +133,7 @@ services:
         timeout: 10s
         retries: 10
 
+# The `worker` service is a Celery worker service for the Prowler application. It processes background tasks and jobs for the application. The service uses the same image as the `api` service and depends on the `api` service being healthy before starting. The service has a stop grace period to allow for soft shutdown and draining of in-flight tasks. The health check for the `worker` service is not explicitly defined, but it relies on the health of the `api` service.
   worker:
     image: prowlercloud/prowler-api:${PROWLER_API_VERSION:-stable}
     # Give Celery soft shutdown time to drain/re-queue in-flight tasks on stop.
@@ -147,6 +154,7 @@ services:
       - "/home/prowler/docker-entrypoint.sh"
       - "worker"
 
+# The `worker-beat` service is a Celery beat service for the Prowler application. It schedules periodic tasks and jobs for the application. The service uses the same image as the `api` service and depends on the `api` service being healthy before starting. The service has ulimits configured for file descriptors. The health check for the `worker-beat` service is not explicitly defined, but it relies on the health of the `api` service.
   worker-beat:
     image: prowlercloud/prowler-api:${PROWLER_API_VERSION:-stable}
     env_file:
@@ -163,6 +171,7 @@ services:
       - "/home/prowler/docker-entrypoint.sh"
       - "beat"
 
+# The `mcp-server` service is the MCP (Message Control Protocol) server for the Prowler application. It runs a FastAPI application using Uvicorn and provides endpoints for communication with other services. The service uses the Prowler MCP Docker image and is configured to use HTTP transport mode. The service exposes port 8000 for external access. The health check for the `mcp-server` service verifies that the server is running and accessible.
   mcp-server:
     image: prowlercloud/prowler-mcp:${PROWLER_MCP_VERSION:-stable}
     environment:
@@ -180,6 +189,7 @@ services:
       retries: 3
       start_period: 60s
 
+# The `output` volume is defined as a local volume for storing output data generated by the Prowler application. It is used by the `api`, `worker`, and `worker-beat` services to store temporary output files. The volume is managed by Docker and persists data across container restarts.
 volumes:
   output:
     driver: local
