@@ -140,7 +140,8 @@ class ASFF(Output):
                 and self._data
             ):
                 # Write JSON opening/header [
-                self._file_descriptor.write("[")
+                if self._file_descriptor.tell() == 0:
+                    self._file_descriptor.write("[")
 
                 # Write findings
                 for finding in self._data:
@@ -152,16 +153,17 @@ class ASFF(Output):
                     self._file_descriptor.write(",")
 
                 # Write footer/closing ]
-                if self._file_descriptor.tell() > 0:
-                    if self._file_descriptor.tell() != 1:
-                        self._file_descriptor.seek(
-                            self._file_descriptor.tell() - 1, SEEK_SET
-                        )
-                    self._file_descriptor.truncate()
-                    self._file_descriptor.write("]")
+                if self.close_file or self._from_cli:
+                    if self._file_descriptor.tell() > 0:
+                        if self._file_descriptor.tell() != 1:
+                            self._file_descriptor.seek(
+                                self._file_descriptor.tell() - 1, SEEK_SET
+                            )
+                        self._file_descriptor.truncate()
+                        self._file_descriptor.write("]")
 
-                # Close file descriptor
-                self._file_descriptor.close()
+                    # Close file descriptor
+                    self._file_descriptor.close()
         except Exception as error:
             logger.error(
                 f"{error.__class__.__name__}[{error.__traceback__.tb_lineno}]: {error}"

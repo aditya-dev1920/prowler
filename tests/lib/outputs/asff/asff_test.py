@@ -601,6 +601,37 @@ class TestASFF:
     def test_batch_write_data_to_file_without_findings(self):
         assert not ASFF([])._file_descriptor
 
+    def test_batch_write_data_to_file_multiple_batches(self):
+        mock_file = StringIO()
+        finding = generate_finding_output(
+            status="FAIL",
+            status_extended="status-extended",
+            resource_name="resource-name",
+            resource_uid="resource-arn",
+            region="eu-west-1",
+        )
+
+        asff = ASFF(findings=[finding], from_cli=False)
+        asff._file_descriptor = mock_file
+        asff.close_file = False
+
+        # First batch
+        asff.batch_write_data_to_file()
+        assert not mock_file.closed
+
+        # Second batch
+        asff._data.clear()
+        asff.transform([finding])
+        asff.close_file = True
+        with patch.object(mock_file, "close", return_value=None):
+            asff.batch_write_data_to_file()
+
+        mock_file.seek(0)
+        content = mock_file.read()
+        parsed = loads(content)
+        assert isinstance(parsed, list)
+        assert len(parsed) == 2
+
     def test_asff_generate_status(self):
         assert ASFF.generate_status("PASS") == "PASSED"
         assert ASFF.generate_status("FAIL") == "FAILED"

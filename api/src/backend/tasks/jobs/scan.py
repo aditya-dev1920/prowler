@@ -997,11 +997,14 @@ def _process_finding_micro_batch(
                         snapshot_resource_fields(resource_uid, resource_instance)
                         resource_instance.type = finding.resource_type
                         updated = True
-                    if resource_instance.metadata != finding.resource_metadata:
+                    new_metadata = (
+                        json.dumps(finding.resource_metadata, cls=CustomEncoder)
+                        if finding.resource_metadata is not None
+                        else None
+                    )
+                    if resource_instance.metadata != new_metadata:
                         snapshot_resource_fields(resource_uid, resource_instance)
-                        resource_instance.metadata = json.dumps(
-                            finding.resource_metadata, cls=CustomEncoder
-                        )
+                        resource_instance.metadata = new_metadata
                         updated = True
                     if resource_instance.details != finding.resource_details:
                         snapshot_resource_fields(resource_uid, resource_instance)

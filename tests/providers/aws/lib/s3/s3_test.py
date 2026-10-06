@@ -221,6 +221,31 @@ class TestS3:
         )
 
     @mock_aws
+    def test_send_to_s3_bucket_multiple_formats(self):
+        # Create bucket
+        current_session = boto3.session.Session(region_name=AWS_REGION_US_EAST_1)
+        client = current_session.client("s3")
+        client.create_bucket(Bucket=S3_BUCKET_NAME)
+
+        s3 = S3(
+            session=current_session,
+            bucket_name=S3_BUCKET_NAME,
+            output_directory=CURRENT_DIRECTORY,
+        )
+
+        csv = CSV(findings=[FINDING], file_extension=".csv")
+        html = HTML(findings=[FINDING], file_extension=".html")
+        s3_send_result = s3.send_to_bucket(outputs={"regular": [csv, html]})
+
+        assert "failure" in s3_send_result
+        assert s3_send_result["failure"] == {}
+        assert "success" in s3_send_result
+        assert ".csv" in s3_send_result["success"]
+        assert ".html" in s3_send_result["success"]
+        assert len(s3_send_result["success"][".csv"]) == 1
+        assert len(s3_send_result["success"][".html"]) == 1
+
+    @mock_aws
     def test_send_to_s3_non_existent_bucket(self):
         # Create bucket
         current_session = boto3.session.Session(region_name=AWS_REGION_US_EAST_1)

@@ -485,9 +485,11 @@ class Scan:
 
                     # Filter the findings by the status
                     if self._status:
-                        for finding in check_findings:
-                            if finding.status not in self._status:
-                                check_findings.remove(finding)
+                        check_findings = [
+                            finding
+                            for finding in check_findings
+                            if finding.status in self._status
+                        ]
 
                     # Remove the executed check
                     self._service_checks_to_execute[service].remove(check_name)

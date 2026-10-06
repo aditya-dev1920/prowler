@@ -181,9 +181,12 @@ class Finding(BaseModel):
                     f"{provider.identity.identity_type}: {provider.identity.identity_id}"
                 )
                 # Get the first tenant domain ID, just in case
-                output_data["account_organization_uid"] = get_nested_attribute(
-                    provider, "identity.tenant_ids"
-                )[0]
+                tenant_ids = (
+                    get_nested_attribute(provider, "identity.tenant_ids") or []
+                )
+                output_data["account_organization_uid"] = (
+                    tenant_ids[0] if tenant_ids else ""
+                )
                 output_data["account_uid"] = (
                     output_data["account_organization_uid"]
                     if "Tenant:" in check_output.subscription
@@ -214,17 +217,20 @@ class Finding(BaseModel):
                 output_data["auth_method"] = (
                     f"Principal: {get_nested_attribute(provider, 'identity.profile')}"
                 )
-                output_data["account_uid"] = provider.projects[
-                    check_output.project_id
-                ].id
-                output_data["account_name"] = provider.projects[
-                    check_output.project_id
-                ].name
+                project = (
+                    provider.projects.get(check_output.project_id)
+                    if hasattr(provider, "projects") and provider.projects
+                    else None
+                )
+                output_data["account_uid"] = (
+                    project.id if project else (check_output.project_id or "")
+                )
+                output_data["account_name"] = (
+                    project.name if project else (check_output.project_id or "")
+                )
                 # There is no concept as project email in GCP
                 # "account_email": "organizations_metadata.account_details_email",
-                output_data["account_tags"] = provider.projects[
-                    check_output.project_id
-                ].labels
+                output_data["account_tags"] = project.labels if project else {}
                 output_data["resource_name"] = check_output.resource_name
                 output_data["resource_uid"] = check_output.resource_id
                 output_data["region"] = check_output.location
@@ -622,28 +628,47 @@ class Finding(BaseModel):
         """
         # Missing Finding's API values
         resource = finding.resources.first()
-        finding.resource_arn = resource.uid
-        finding.resource_name = resource.name
-        finding.resource = json.loads(resource.metadata)
-        finding.resource_details = resource.details
+        finding.resource_arn = resource.uid if resource else ""
+        finding.resource_name = resource.name if resource else ""
+        try:
+            finding.resource = (
+                json.loads(resource.metadata)
+                if resource and resource.metadata
+                else {}
+            )
+        except (ValueError, TypeError):
+            finding.resource = {}
+        finding.resource_details = resource.details if resource else ""
 
-        finding.resource_id = resource.name if provider.type == "aws" else resource.uid
+        finding.resource_id = (
+            (resource.name if provider.type == "aws" else resource.uid)
+            if resource
+            else ""
+        )
 
         # AWS specified field
-        finding.region = resource.region
+        finding.region = resource.region if resource else ""
         # Azure, GCP specified field
-        finding.location = resource.region
+        finding.location = resource.region if resource else ""
         # GitHub specified field
-        finding.owner = resource.region
+        finding.owner = resource.region if resource else ""
         # K8s specified field
         if provider.type == "kubernetes":
-            finding.namespace = resource.region.removeprefix("namespace: ")
+            finding.namespace = (
+                resource.region.removeprefix("namespace: ")
+                if resource and resource.region
+                else ""
+            )
         if provider.type == "azure":
-            finding.subscription = list(provider.identity.subscriptions.keys())[0]
+            subscriptions = list(
+                getattr(provider.identity, "subscriptions", {}).keys()
+            )
+            finding.subscription = subscriptions[0] if subscriptions else ""
         elif provider.type == "gcp":
-            finding.project_id = list(provider.projects.keys())[0]
+            projects = list(getattr(provider, "projects", {}).keys())
+            finding.project_id = projects[0] if projects else ""
         elif provider.type == "stackit":
-            finding.project_id = provider.identity.project_id
+            finding.project_id = getattr(provider.identity, "project_id", "")
         elif provider.type == "iac":
             # For IaC, we don't have resource_line_range in the Finding model
             # It would need to be extracted from the resource metadata if needed
@@ -692,6 +717,8 @@ class Finding(BaseModel):
         )
         finding.resource_tags = unroll_tags(
             [{"key": tag.key, "value": tag.value} for tag in resource.tags.all()]
+            if resource
+            else []
         )
 
         return cls.generate_output(provider, finding, SimpleNamespace())

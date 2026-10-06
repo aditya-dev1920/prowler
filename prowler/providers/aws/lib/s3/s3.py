@@ -231,26 +231,16 @@ class S3:
                             },
                         )
 
-                        if output.file_extension in uploaded_objects["success"]:
-                            uploaded_objects["success"][output.file_extension].append(
-                                object_name
-                            )
-                        else:
-                            uploaded_objects["success"] = {
-                                output.file_extension: [object_name]
-                            }
+                        uploaded_objects["success"].setdefault(
+                            output.file_extension, []
+                        ).append(object_name)
                     except Exception as error:
                         logger.error(
                             f"{error.__class__.__name__}[{error.__traceback__.tb_lineno}] -- {error}"
                         )
-                        if output.file_extension in uploaded_objects["failure"]:
-                            uploaded_objects["failure"][output.file_extension].append(
-                                (object_name, error)
-                            )
-                        else:
-                            uploaded_objects["failure"] = {
-                                output.file_extension: [(object_name, error)]
-                            }
+                        uploaded_objects["failure"].setdefault(
+                            output.file_extension, []
+                        ).append((object_name, error))
 
         except Exception as error:
             logger.error(
