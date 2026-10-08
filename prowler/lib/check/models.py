@@ -733,7 +733,15 @@ class Check_Report:
                       Only accepted dict, list, BaseModels (dict attribute), custom models (with to_dict attribute) and dataclasses.
         """
         self.status = ""
-        self.check_metadata = CheckMetadata.parse_raw(metadata)
+        if isinstance(metadata, (str, bytes)):
+            self.check_metadata = CheckMetadata.parse_raw(metadata)
+        elif isinstance(metadata, dict) and metadata:
+            self.check_metadata = CheckMetadata.parse_obj(metadata)
+        elif isinstance(metadata, CheckMetadata):
+            self.check_metadata = metadata
+        else:
+            self.check_metadata = None
+
         if isinstance(resource, dict):
             self.resource = resource
         elif hasattr(resource, "dict"):
@@ -743,8 +751,13 @@ class Check_Report:
         elif is_dataclass(resource):
             self.resource = asdict(resource)
         else:
+            check_id = (
+                getattr(self.check_metadata, "CheckID", "")
+                if self.check_metadata
+                else ""
+            )
             logger.error(
-                f"Resource metadata {type(resource)} in {self.check_metadata.CheckID} could not be converted to dict"
+                f"Resource metadata {type(resource)} in {check_id} could not be converted to dict"
             )
             self.resource = {}
         self.status_extended = ""
@@ -1201,7 +1214,10 @@ class CheckReportIAC(Check_Report):
     resource_line_range: str
 
     def __init__(
-        self, metadata: dict = {}, finding: dict = {}, file_path: str = ""
+        self,
+        metadata: Optional[dict] = None,
+        finding: Optional[dict] = None,
+        file_path: str = "",
     ) -> None:
         """
         Initialize the IAC Check's finding information from a Trivy misconfiguration dict.
@@ -1210,6 +1226,10 @@ class CheckReportIAC(Check_Report):
             metadata (Dict): Optional check metadata (can be None).
             finding (dict): A single misconfiguration result from Trivy's JSON output.
         """
+        if metadata is None:
+            metadata = {}
+        if finding is None:
+            finding = {}
         super().__init__(metadata, finding)
 
         self.resource = finding
@@ -1271,7 +1291,11 @@ class CheckReportLLM(Check_Report):
     response: str
     model: str
 
-    def __init__(self, metadata: dict = {}, finding: dict = {}) -> None:
+    def __init__(
+        self,
+        metadata: Optional[dict] = None,
+        finding: Optional[dict] = None,
+    ) -> None:
         """
         Initialize the LLM Check's finding information from a promptfoo finding dict.
 
@@ -1279,6 +1303,10 @@ class CheckReportLLM(Check_Report):
             metadata (Dict): Optional check metadata (can be None).
             finding (dict): A single finding result from promptfoo's JSON output.
         """
+        if metadata is None:
+            metadata = {}
+        if finding is None:
+            finding = {}
         super().__init__(metadata, finding)
 
         self.prompt = finding.get("prompt", {}).get("raw", "No prompt available.")

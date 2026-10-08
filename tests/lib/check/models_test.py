@@ -4,7 +4,7 @@ from unittest import mock
 import pytest
 from pydantic.v1 import ValidationError
 
-from prowler.lib.check.models import Check, CheckMetadata
+from prowler.lib.check.models import Check, CheckMetadata, CheckReportIAC, CheckReportLLM
 from tests.lib.check.compliance_check_test import custom_compliance_metadata
 
 mock_metadata = CheckMetadata(
@@ -2740,3 +2740,18 @@ class TestExternalToolProviderValidatorBypass:
             }
             metadata = CheckMetadata(**data)
             assert metadata.Provider == provider
+
+
+class TestCheckReportDefaults:
+    def test_check_report_iac_default_dict_is_not_shared(self):
+        report1 = CheckReportIAC()
+        report1.resource["custom_key"] = "leak"
+        report2 = CheckReportIAC()
+        assert "custom_key" not in report2.resource
+
+    def test_check_report_llm_default_dict_is_not_shared(self):
+        report1 = CheckReportLLM()
+        report1.resource["custom_meta"] = "leak"
+        report2 = CheckReportLLM()
+        assert "custom_meta" not in report2.resource
+

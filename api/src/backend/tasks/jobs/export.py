@@ -1,6 +1,7 @@
 import os
 import re
 import zipfile
+from datetime import UTC, datetime
 
 import boto3
 import config.django.base as base
@@ -303,7 +304,11 @@ def _build_output_path(
     prowler_provider_sanitized = re.sub(r"[^\w\-]", "-", prowler_provider)
 
     with rls_transaction(tenant_id):
-        started_at = Scan.objects.get(id=scan_id).started_at
+        scan = Scan.objects.get(id=scan_id)
+        started_at = scan.started_at or scan.inserted_at
+
+    if not started_at:
+        started_at = datetime.now(tz=UTC)
 
     set_output_timestamp(started_at)
 

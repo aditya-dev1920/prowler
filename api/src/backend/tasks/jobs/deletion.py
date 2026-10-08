@@ -113,8 +113,9 @@ def delete_provider(tenant_id: str, pk: str):
             graph_database.drop_subgraph(tenant_database_name, str(pk))
 
     except graph_database.GraphDatabaseQueryException as gdb_error:
-        logger.error(f"Error deleting Provider graph data: {gdb_error}")
-        raise
+        logger.warning(
+            f"Failed to delete Provider graph data (graph DB may be offline): {gdb_error}, continuing"
+        )
 
     # Delete related data in batches
     deletion_summary = {}
@@ -170,8 +171,9 @@ def delete_tenant(pk: str):
         tenant_database_name = graph_database.get_database_name(pk)
         graph_database.drop_database(tenant_database_name)
     except graph_database.GraphDatabaseQueryException as gdb_error:
-        logger.error(f"Error dropping Tenant graph database: {gdb_error}")
-        raise
+        logger.warning(
+            f"Failed to drop Tenant graph database (graph DB may be offline): {gdb_error}, continuing"
+        )
 
     Tenant.objects.using(MainRouter.admin_db).filter(id=pk).delete()
 

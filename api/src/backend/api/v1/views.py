@@ -244,6 +244,7 @@ from api.v1.serializers import (
     UserUpdateSerializer,
 )
 from botocore.exceptions import ClientError, NoCredentialsError, ParamValidationError
+from celery import states
 from celery.result import AsyncResult
 from config.custom_logging import BackendLogger
 from config.env import env
@@ -2895,6 +2896,22 @@ class TaskViewSet(BaseRLSViewSet):
 
         task_instance = AsyncResult(pk)
         task_instance.revoke()
+
+        now = datetime.now(tz=UTC)
+        if task.task_runner_task:
+            task.task_runner_task.status = states.REVOKED
+            task.task_runner_task.date_done = now
+            task.task_runner_task.save(update_fields=["status", "date_done"])
+
+        Scan.all_objects.filter(
+            task_id=task.id,
+            state__in=[
+                StateChoices.AVAILABLE,
+                StateChoices.SCHEDULED,
+                StateChoices.EXECUTING,
+            ],
+        ).update(state=StateChoices.CANCELLED, completed_at=now)
+
         task.refresh_from_db()
         serializer = TaskSerializer(task)
         return Response(
