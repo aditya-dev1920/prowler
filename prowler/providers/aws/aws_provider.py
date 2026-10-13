@@ -217,6 +217,11 @@ class AwsProvider(Provider):
                 config_path = default_config_file_path
             self._audit_config = load_and_validate_config_file(self._type, config_path)
 
+        if not regions:
+            env_regions = os.getenv("PROWLER_AWS_REGIONS", "us-east-1,ap-south-1")
+            if env_regions:
+                regions = {r.strip() for r in env_regions.split(",") if r.strip()}
+
         excluded_regions = self.resolve_excluded_regions(
             excluded_regions, self._audit_config
         )

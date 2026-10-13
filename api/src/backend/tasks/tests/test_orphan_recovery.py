@@ -291,13 +291,13 @@ class TestReconcileTaskResults:
     @pytest.mark.parametrize(
         "task_name",
         [
-            "scan-perform",
             "attack-paths-scan-perform",
             "attack-paths-cleanup-stale-scans",
+            "reconcile-orphan-tasks",
         ],
     )
-    def test_scan_task_is_skipped_entirely(self, tenants_fixture, task_name):
-        """Scan tasks are excluded from recovery: the watchdog never touches them."""
+    def test_maintenance_tasks_are_skipped_entirely(self, tenants_fixture, task_name):
+        """Maintenance tasks are excluded from recovery: the watchdog never touches them."""
         tr = _orphan_result(
             name=task_name,
             kwargs={
@@ -317,6 +317,60 @@ class TestReconcileTaskResults:
         assert tr.task_id not in result["failed"]
         assert tr.task_id not in result["skipped"]
         mock_task.apply_async.assert_not_called()
+
+    @pytest.mark.parametrize("task_name", ["scan-perform", "scan-perform-scheduled"])
+    def test_orphaned_scan_task_marks_scan_failed_and_terminal(
+        self, tenants_fixture, task_name
+    ):
+        """Orphaned scan tasks are marked terminal and fail their associated scan in DB,
+        without being auto-reenqueued."""
+        from api.db_utils import rls_transaction
+        from api.models import Provider, Scan, StateChoices, Task
+
+        tenant = tenants_fixture[0]
+        scan_id = str(uuid4())
+        tr = _orphan_result(
+            name=task_name,
+            kwargs={
+                "tenant_id": str(tenant.id),
+                "scan_id": scan_id,
+            },
+            worker="dead@gone",
+            created_minutes_ago=60,
+        )
+        with rls_transaction(str(tenant.id)):
+            provider = Provider.objects.create(
+                tenant_id=str(tenant.id),
+                provider=Provider.ProviderChoices.AWS.value,
+                uid="123456789012",
+            )
+            task_model = Task.objects.create(
+                tenant_id=str(tenant.id),
+                task_runner_task=tr,
+            )
+            scan = Scan.objects.create(
+                id=scan_id,
+                tenant_id=str(tenant.id),
+                provider=provider,
+                task=task_model,
+                trigger=Scan.TriggerChoices.MANUAL,
+                state=StateChoices.EXECUTING,
+            )
+
+        p_alive, p_revoke, p_app, mock_task = self._patches(alive=False)
+        with p_alive, p_revoke, p_app:
+            result = _reconcile_task_results(
+                grace_minutes=2, max_attempts=3, window_hours=6, dry_run=False
+            )
+
+        assert tr.task_id in result["failed"]
+        mock_task.apply_async.assert_not_called()
+        tr.refresh_from_db()
+        assert tr.status == states.REVOKED
+
+        scan.refresh_from_db()
+        assert scan.state == StateChoices.FAILED
+        assert scan.completed_at is not None
 
     def test_jira_integration_task_is_not_reenqueued(self, tenants_fixture):
         """integration-jira stays terminal: re-running it would create duplicate Jira

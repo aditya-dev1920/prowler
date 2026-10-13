@@ -1,3 +1,4 @@
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from prowler.lib.logger import logger
@@ -9,7 +10,8 @@ from prowler.providers.aws.aws_provider import AwsProvider
 #     get_default_region,
 # )
 
-MAX_WORKERS = 10
+DEFAULT_MAX_WORKERS = 4
+MAX_WORKERS = int(os.environ.get("PROWLER_AWS_MAX_WORKERS", DEFAULT_MAX_WORKERS))
 
 
 class AWSService:
@@ -22,6 +24,25 @@ class AWSService:
     """
 
     failed_checks = set()
+    _shared_thread_pool: ThreadPoolExecutor = None
+
+    @classmethod
+    def get_thread_pool(cls) -> ThreadPoolExecutor:
+        """Return a process-wide shared thread pool to avoid spawning hundreds of dormant OS threads across services."""
+        if cls._shared_thread_pool is None:
+            max_workers = int(os.environ.get("PROWLER_AWS_MAX_WORKERS", DEFAULT_MAX_WORKERS))
+            cls._shared_thread_pool = ThreadPoolExecutor(max_workers=max_workers)
+        return cls._shared_thread_pool
+
+    @property
+    def thread_pool(self) -> ThreadPoolExecutor:
+        if getattr(self, "_custom_thread_pool", None) is not None:
+            return self._custom_thread_pool
+        return self.get_thread_pool()
+
+    @thread_pool.setter
+    def thread_pool(self, value: ThreadPoolExecutor):
+        self._custom_thread_pool = value
 
     @classmethod
     def set_failed_check(cls, check_id=None, arn=None):
@@ -39,6 +60,7 @@ class AWSService:
         global_service=False,
         region: str = None,
     ):
+        self._custom_thread_pool = None
         # Audit Information
         # Do we need to store the whole provider?
         self.provider = provider
@@ -71,9 +93,6 @@ class AWSService:
             self.service, global_service=global_service
         )
         self.client = self.session.client(self.service, self.region)
-
-        # Thread pool for __threading_call__
-        self.thread_pool = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 
     def __get_session__(self):
         return self.session

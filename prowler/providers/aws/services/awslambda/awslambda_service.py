@@ -186,18 +186,11 @@ class Lambda(AWSService):
 
     def _get_function_code(self):
         logger.info("Lambda - Getting Function Code...")
-        # Use a thread pool handle the queueing and execution of the _fetch_function_code tasks, up to max_workers tasks concurrently.
-        lambda_functions_to_fetch = {
-            self.thread_pool.submit(
-                self._fetch_function_code, function.name, function.region
-            ): function
-            for function in self.functions.values()
-        }
-
-        for fetched_lambda_code in as_completed(lambda_functions_to_fetch):
-            function = lambda_functions_to_fetch[fetched_lambda_code]
+        for function in self.functions.values():
             try:
-                function_code = fetched_lambda_code.result()
+                function_code = self._fetch_function_code(
+                    function.name, function.region
+                )
                 if function_code:
                     yield function, function_code
             except Exception as error:
@@ -230,19 +223,9 @@ class Lambda(AWSService):
 
     def _get_layers_code(self):
         logger.info("Lambda - Getting Layer Code...")
-        # Use a thread pool to handle the queueing and execution of the
-        # _fetch_layer_code tasks, up to max_workers tasks concurrently.
-        layers_to_fetch = {
-            self.thread_pool.submit(
-                self._fetch_layer_code, layer.arn, layer.region
-            ): layer
-            for layer in self.layers.values()
-        }
-
-        for fetched_layer_code in as_completed(layers_to_fetch):
-            layer = layers_to_fetch[fetched_layer_code]
+        for layer in self.layers.values():
             try:
-                layer_code = fetched_layer_code.result()
+                layer_code = self._fetch_layer_code(layer.arn, layer.region)
                 if layer_code:
                     yield layer, layer_code
             except Exception as error:

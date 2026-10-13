@@ -1,3 +1,4 @@
+import os
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from datetime import datetime
 from json import loads
@@ -16,7 +17,7 @@ from prowler.providers.aws.services.ecr.image_inspection import ImageInspector
 # MAX_LAYER_DOWNLOAD_BYTES compressed plus MAX_TOTAL_BYTES_PER_IMAGE decompressed
 # content (see image_inspection), so a high worker count would multiply peak
 # memory into several GB.
-IMAGE_SCAN_MAX_WORKERS = 4
+IMAGE_SCAN_MAX_WORKERS = int(os.getenv("PROWLER_ECR_IMAGE_SCAN_MAX_WORKERS", "1"))
 
 
 class ECR(AWSService):

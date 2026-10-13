@@ -24,6 +24,7 @@ from api.models import (
 from api.utils import initialize_prowler_provider
 from api.v1.serializers import ScanTaskSerializer
 from celery import chain, group, shared_task, states
+from celery.signals import task_failure, task_revoked
 from celery.utils.log import get_task_logger
 from config.celery import RLSTask
 from config.django.base import DJANGO_FINDINGS_BATCH_SIZE, DJANGO_TMP_OUTPUT_DIRECTORY
@@ -488,9 +489,137 @@ def delete_provider_task(provider_id: str, tenant_id: str):
     return delete_provider(tenant_id=tenant_id, pk=provider_id)
 
 
+class ScanRLSTask(RLSTask):
+    """
+    RLS task that marks the `Scan` DB row as `FAILED` when the Celery task fails.
+
+    Covers failures that happen outside the job's own try/except (e.g. worker process death,
+    unhandled provider lookup errors, or abrupt termination).
+    """
+
+    def on_failure(self, exc, task_id, args, kwargs, _einfo):  # noqa: ARG002
+        tenant_id = kwargs.get("tenant_id") or (args[0] if args and len(args) > 0 else None)
+        task_name = getattr(self, "name", "")
+        scan_id = kwargs.get("scan_id") or (args[1] if args and len(args) > 1 and task_name == "scan-perform" else None)
+
+        if tenant_id:
+            try:
+                with rls_transaction(str(tenant_id)):
+                    if scan_id:
+                        Scan.objects.filter(
+                            pk=scan_id,
+                            state__in=[StateChoices.AVAILABLE, StateChoices.SCHEDULED, StateChoices.EXECUTING],
+                        ).update(
+                            state=StateChoices.FAILED,
+                            completed_at=datetime.now(tz=UTC),
+                        )
+                    elif task_id:
+                        Scan.objects.filter(
+                            task__task_runner_task__task_id=task_id,
+                            state__in=[StateChoices.AVAILABLE, StateChoices.SCHEDULED, StateChoices.EXECUTING],
+                        ).update(
+                            state=StateChoices.FAILED,
+                            completed_at=datetime.now(tz=UTC),
+                        )
+            except Exception as e:
+                logger.error(f"Error marking scan as failed on task {task_id} failure: {e}")
+
+
+@task_failure.connect
+def on_scan_task_failure(
+    sender=None,
+    task_id=None,
+    exception=None,  # noqa: ARG001
+    args=None,
+    kwargs=None,
+    **extra,  # noqa: ARG001
+):
+    """Ensure any scan associated with a failed/crashed Celery task transitions to FAILED."""
+    task_name = getattr(sender, "name", None) if sender else None
+    if task_name not in ("scan-perform", "scan-perform-scheduled"):
+        return
+
+    try:
+        kwargs_dict = kwargs or {}
+        args_list = list(args or [])
+
+        tenant_id = kwargs_dict.get("tenant_id") or (args_list[0] if len(args_list) > 0 else None)
+        scan_id = kwargs_dict.get("scan_id") or (args_list[1] if len(args_list) > 1 and task_name == "scan-perform" else None)
+
+        if not tenant_id:
+            return
+
+        with rls_transaction(str(tenant_id)):
+            if scan_id:
+                Scan.objects.filter(
+                    pk=scan_id,
+                    state__in=[StateChoices.AVAILABLE, StateChoices.SCHEDULED, StateChoices.EXECUTING],
+                ).update(
+                    state=StateChoices.FAILED,
+                    completed_at=datetime.now(tz=UTC),
+                )
+            elif task_id:
+                Scan.objects.filter(
+                    task__task_runner_task__task_id=task_id,
+                    state__in=[StateChoices.AVAILABLE, StateChoices.SCHEDULED, StateChoices.EXECUTING],
+                ).update(
+                    state=StateChoices.FAILED,
+                    completed_at=datetime.now(tz=UTC),
+                )
+    except Exception as e:
+        logger.error(f"Error failing scan on Celery task failure signal: {e}")
+
+
+@task_revoked.connect
+def on_scan_task_revoked(
+    request=None,
+    terminated=None,  # noqa: ARG001
+    signum=None,  # noqa: ARG001
+    expired=None,  # noqa: ARG001
+    **extra,  # noqa: ARG001
+):
+    """Ensure any scan associated with a revoked/terminated Celery task transitions to FAILED."""
+    if not request:
+        return
+    task_name = getattr(request, "task_name", None) or getattr(request, "task", None)
+    if task_name not in ("scan-perform", "scan-perform-scheduled"):
+        return
+
+    try:
+        kwargs_dict = getattr(request, "kwargs", {}) or {}
+        args_list = list(getattr(request, "args", []) or [])
+
+        tenant_id = kwargs_dict.get("tenant_id") or (args_list[0] if len(args_list) > 0 else None)
+        scan_id = kwargs_dict.get("scan_id") or (args_list[1] if len(args_list) > 1 and task_name == "scan-perform" else None)
+        task_id = getattr(request, "id", None)
+
+        if not tenant_id:
+            return
+
+        with rls_transaction(str(tenant_id)):
+            if scan_id:
+                Scan.objects.filter(
+                    pk=scan_id,
+                    state__in=[StateChoices.AVAILABLE, StateChoices.SCHEDULED, StateChoices.EXECUTING],
+                ).update(
+                    state=StateChoices.FAILED,
+                    completed_at=datetime.now(tz=UTC),
+                )
+            elif task_id:
+                Scan.objects.filter(
+                    task__task_runner_task__task_id=task_id,
+                    state__in=[StateChoices.AVAILABLE, StateChoices.SCHEDULED, StateChoices.EXECUTING],
+                ).update(
+                    state=StateChoices.FAILED,
+                    completed_at=datetime.now(tz=UTC),
+                )
+    except Exception as e:
+        logger.error(f"Error failing scan on Celery task revocation signal: {e}")
+
+
 # acks_late=False: a re-run would duplicate findings and the task is not auto-recovered,
 # so a crashed scan is dropped rather than redelivered by the broker (as before #11416).
-@shared_task(base=RLSTask, name="scan-perform", queue="scans", acks_late=False)
+@shared_task(base=ScanRLSTask, name="scan-perform", queue="scans", acks_late=False)
 @handle_provider_deletion
 def perform_scan_task(
     tenant_id: str, scan_id: str, provider_id: str, checks_to_execute: list[str] = None
@@ -538,7 +667,7 @@ def perform_scan_task(
 
 # acks_late=False: like scan-perform; a dropped run is re-fired by Beat on the next tick.
 @shared_task(
-    base=RLSTask,
+    base=ScanRLSTask,
     bind=True,
     name="scan-perform-scheduled",
     queue="scans",

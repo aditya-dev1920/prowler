@@ -39,28 +39,28 @@ def schedule_provider_scan(provider_instance: Provider):
             scheduled_at=datetime.now(UTC),
         )
 
-    attack_paths_db_utils.create_attack_paths_scan(
-        tenant_id=tenant_id,
-        scan_id=str(scheduled_scan.id),
-        provider_id=provider_id,
-    )
+        attack_paths_db_utils.create_attack_paths_scan(
+            tenant_id=tenant_id,
+            scan_id=str(scheduled_scan.id),
+            provider_id=provider_id,
+        )
 
-    # Schedule the task
-    periodic_task_instance = PeriodicTask.objects.create(
-        interval=schedule,
-        name=task_name,
-        task="scan-perform-scheduled",
-        kwargs=json.dumps(
-            {
-                "tenant_id": tenant_id,
-                "provider_id": provider_id,
-            }
-        ),
-        one_off=False,
-        start_time=datetime.now(UTC) + timedelta(hours=24),
-    )
-    scheduled_scan.scheduler_task_id = periodic_task_instance.id
-    scheduled_scan.save()
+        # Schedule the task
+        periodic_task_instance = PeriodicTask.objects.create(
+            interval=schedule,
+            name=task_name,
+            task="scan-perform-scheduled",
+            kwargs=json.dumps(
+                {
+                    "tenant_id": tenant_id,
+                    "provider_id": provider_id,
+                }
+            ),
+            one_off=False,
+            start_time=datetime.now(UTC) + timedelta(hours=24),
+        )
+        scheduled_scan.scheduler_task_id = periodic_task_instance.id
+        scheduled_scan.save()
 
     return perform_scheduled_scan_task.apply_async(
         kwargs={

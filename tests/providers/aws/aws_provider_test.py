@@ -1409,6 +1409,12 @@ aws:
             assert aws_provider.generate_regional_clients("ec2") == {}
 
     @mock_aws
+    def test_aws_provider_regions_from_env(self, monkeypatch):
+        monkeypatch.setenv("PROWLER_AWS_REGIONS", "us-east-1,ap-south-1")
+        aws_provider = AwsProvider()
+        assert aws_provider.identity.audited_regions == {"us-east-1", "ap-south-1"}
+
+    @mock_aws
     def test_get_tagged_resources(self):
         ec2_client = client("ec2", region_name=AWS_REGION_EU_CENTRAL_1)
         instances = ec2_client.run_instances(

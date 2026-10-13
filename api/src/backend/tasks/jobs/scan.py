@@ -1,5 +1,6 @@
 import copy
 import csv
+import gc
 import io
 import json
 import random
@@ -1446,6 +1447,7 @@ def perform_prowler_scan(
                     )
                 last_persisted_progress = progress
                 last_persisted_progress_at = now
+                gc.collect()
 
         scan_instance.state = StateChoices.COMPLETED
 

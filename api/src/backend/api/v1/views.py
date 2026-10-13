@@ -6693,9 +6693,12 @@ class OverviewViewSet(ProviderFilterParamsMixin, BaseRLSViewSet):
 class ScheduleViewSet(ProviderVisibilityMixin, BaseRLSViewSet):
     # TODO: change to Schedule when implemented
     queryset = Task.objects.none()
-    http_method_names = ["post"]
+    http_method_names = ["get", "post"]
     # RBAC required permissions
     required_permissions = [Permissions.MANAGE_SCANS]
+
+    def list(self, request, *args, **kwargs):
+        return Response({"data": []})
 
     def get_queryset(self):
         return super().get_queryset()

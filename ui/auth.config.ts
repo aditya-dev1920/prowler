@@ -69,6 +69,7 @@ const TENANT_SWITCH_ERROR = "TenantSwitchError";
 
 const NON_RETRYABLE_USER_ME_STATUSES = new Set([401, 403, 404]);
 const USER_REFRESH_TIMEOUT_MS = 5_000;
+export const TOKEN_REFRESH_BACKOFF_MS = 30_000;
 
 type TokenUserInput = Partial<TokenUser> & { company?: string };
 
@@ -134,14 +135,17 @@ const applyDecodedClaims = (
 
 const refreshTokenPromises = new Map<string, Promise<AuthToken>>();
 
+const failTokenRefresh = (token: AuthToken, error: string): AuthToken => ({
+  ...token,
+  error,
+  accessTokenExpires: Date.now() + TOKEN_REFRESH_BACKOFF_MS,
+});
+
 const refreshAccessToken = async (token: AuthToken): Promise<AuthToken> => {
   const refreshToken = token.refreshToken;
 
   if (!refreshToken) {
-    return {
-      ...token,
-      error: "MissingRefreshToken",
-    };
+    return failTokenRefresh(token, "MissingRefreshToken");
   }
 
   const existingPromise = refreshTokenPromises.get(refreshToken);
@@ -181,10 +185,7 @@ const refreshAccessToken = async (token: AuthToken): Promise<AuthToken> => {
           "Failed to refresh access token:",
           detail || `HTTP error ${response.status}`,
         );
-        return {
-          ...token,
-          error: "RefreshAccessTokenError",
-        };
+        return failTokenRefresh(token, "RefreshAccessTokenError");
       }
 
       const newAccessToken = payload?.data?.attributes?.access as
@@ -197,10 +198,7 @@ const refreshAccessToken = async (token: AuthToken): Promise<AuthToken> => {
       if (!newAccessToken) {
         // eslint-disable-next-line no-console
         console.warn("Missing access token in refresh response");
-        return {
-          ...token,
-          error: "RefreshAccessTokenError",
-        };
+        return failTokenRefresh(token, "RefreshAccessTokenError");
       }
 
       const nextToken: AuthToken = {
@@ -225,11 +223,10 @@ const refreshAccessToken = async (token: AuthToken): Promise<AuthToken> => {
           NON_RETRYABLE_USER_ME_STATUSES.has(error.status)
         ) {
           return {
-            ...nextToken,
+            ...failTokenRefresh(nextToken, "RefreshAccessTokenError"),
             accessToken: undefined,
             refreshToken: undefined,
             user: undefined,
-            error: "RefreshAccessTokenError",
           };
         }
 
@@ -241,10 +238,7 @@ const refreshAccessToken = async (token: AuthToken): Promise<AuthToken> => {
     } catch (error) {
       // eslint-disable-next-line no-console
       console.warn("Error refreshing access token:", error);
-      return {
-        ...token,
-        error: "RefreshAccessTokenError",
-      };
+      return failTokenRefresh(token, "RefreshAccessTokenError");
     }
   })();
 

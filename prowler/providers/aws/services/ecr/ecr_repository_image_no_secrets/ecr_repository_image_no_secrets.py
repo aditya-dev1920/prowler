@@ -1,3 +1,4 @@
+import gc
 import re
 
 from prowler.lib.check.models import Check, Check_Report_AWS
@@ -65,6 +66,7 @@ class ecr_repository_image_no_secrets(Check):
                     # retained memory stays flat instead of growing with the
                     # number of repositories scanned.
                     scanned_file.content = ""
+                gc.collect()
 
         # Phase 2: batch — one call, chunked Kingfisher subprocesses. This
         # must fully consume image_payloads() so every image is appended to

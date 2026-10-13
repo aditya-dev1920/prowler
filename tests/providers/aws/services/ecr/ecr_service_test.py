@@ -11,6 +11,7 @@ from moto import mock_aws
 
 from prowler.providers.aws.services.ecr.ecr_service import (
     ECR,
+    IMAGE_SCAN_MAX_WORKERS,
     ScanningRule,
 )
 from tests.providers.aws.services.ecr.image_scan_fixtures import (
@@ -614,7 +615,7 @@ class Test_ECR_Service:
             first_result[1].latest_digest
             == repositories[0].images_details[-1].latest_digest
         )
-        assert executor.submit.call_count == 4
+        assert executor.submit.call_count == IMAGE_SCAN_MAX_WORKERS
 
     @mock_aws
     def test_get_scan_target_image_ignores_stale_scanned_image(self):

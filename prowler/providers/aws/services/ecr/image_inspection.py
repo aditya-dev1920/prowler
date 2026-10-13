@@ -1,4 +1,5 @@
 import gzip
+import os
 import tarfile
 from contextlib import contextmanager
 from json import loads
@@ -19,13 +20,21 @@ _MANIFEST_LIST_MEDIA_TYPES = {
 
 # Compressed size of a single layer, checked against the manifest-declared
 # size before downloading, and re-checked against actual bytes received.
-MAX_LAYER_DOWNLOAD_BYTES = 100 * 1024 * 1024
+MAX_LAYER_DOWNLOAD_BYTES = int(
+    os.getenv("PROWLER_ECR_MAX_LAYER_DOWNLOAD_BYTES", str(50 * 1024 * 1024))
+)
 # Size of a single extracted file considered for scanning.
-MAX_FILE_BYTES = 1 * 1024 * 1024
+MAX_FILE_BYTES = int(
+    os.getenv("PROWLER_ECR_MAX_FILE_BYTES", str(1 * 1024 * 1024))
+)
 # Hard cap on the number of files scanned per image, across all its layers.
-MAX_FILES_PER_IMAGE = 5000
+MAX_FILES_PER_IMAGE = int(
+    os.getenv("PROWLER_ECR_MAX_FILES_PER_IMAGE", "1000")
+)
 # Hard cap on total decompressed bytes read per image, across all its layers.
-MAX_TOTAL_BYTES_PER_IMAGE = 500 * 1024 * 1024
+MAX_TOTAL_BYTES_PER_IMAGE = int(
+    os.getenv("PROWLER_ECR_MAX_TOTAL_BYTES_PER_IMAGE", str(100 * 1024 * 1024))
+)
 LAYER_DOWNLOAD_TIMEOUT_SECONDS = 30
 
 

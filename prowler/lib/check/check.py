@@ -74,6 +74,7 @@ def parse_checks_from_file(input_file: str, provider: str) -> set:
         logger.error(
             f"{error.__class__.__name__}[{error.__traceback__.tb_lineno}] -- {error}"
         )
+        return set()
 
 
 # Load checks from custom folder

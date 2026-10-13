@@ -540,11 +540,51 @@ describe("authConfig JWT callback", () => {
     // Then
     expect(getUserByMeMock).not.toHaveBeenCalled();
     expect(result.error).toBe("RefreshAccessTokenError");
+    expect(result.accessTokenExpires).toBeGreaterThan(Date.now());
     expect(session.error).toBe("RefreshAccessTokenError");
     expect(session.user).toBeUndefined();
     expect(session.accessToken).toBeUndefined();
     expect(session.refreshToken).toBeUndefined();
     expect(session.tenantId).toBeUndefined();
+  });
+
+  it("should apply backoff on token refresh failure to prevent infinite refresh loops", async () => {
+    // Given
+    const expiredAccessToken = accessTokenFor("tenant-1", 1);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({ errors: [{ detail: "Refresh token expired" }] }),
+        { status: 401 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const jwtCallback = authConfig.callbacks?.jwt;
+    if (!jwtCallback) throw new Error("JWT callback is not configured");
+
+    // When: First attempt fails and sets backoff
+    const firstResult = await jwtCallback({
+      token: {
+        accessToken: expiredAccessToken,
+        refreshToken: "expired-refresh-token",
+      },
+      user: {} as Parameters<typeof jwtCallback>[0]["user"],
+    });
+
+    // Then: Error is recorded and accessTokenExpires is pushed forward into the future
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(firstResult.error).toBe("RefreshAccessTokenError");
+    expect(firstResult.accessTokenExpires).toBeGreaterThan(Date.now());
+
+    // When: Subsequent attempt within the backoff period occurs
+    const secondResult = await jwtCallback({
+      token: firstResult,
+      user: {} as Parameters<typeof jwtCallback>[0]["user"],
+    });
+
+    // Then: Does not hit the API again, reusing the backoff-quarantined token
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(secondResult).toBe(firstResult);
   });
 
   it("should deduplicate concurrent token and user refreshes", async () => {

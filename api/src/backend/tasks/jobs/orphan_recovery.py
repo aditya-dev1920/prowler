@@ -75,13 +75,10 @@ def reenqueueable_tasks() -> set[str]:
     }
 
 
-# Tasks the watchdog ignores entirely (not even marked terminal): scan tasks are not
-# auto-recovered, since re-running a scan is not safe to do automatically; attack-paths
+# Tasks the watchdog ignores entirely (not even marked terminal): attack-paths
 # scans are handled by their own stale-cleanup (which also drops the temp Neo4j db);
 # and the maintenance tasks must not self-recover (they run again on their own schedule).
 _SKIP_RECOVERY = {
-    "scan-perform",
-    "scan-perform-scheduled",
     "attack-paths-scan-perform",
     "attack-paths-cleanup-stale-scans",
     "reconcile-orphan-tasks",
@@ -236,6 +233,45 @@ def _recovery_attempt_count(name: str, kwargs_repr, window_hours: int) -> int:
         return 1
 
 
+def _fail_associated_scans(task_result, now: datetime, kwargs_repr) -> None:
+    """Mark in-flight Scan records associated with an orphaned scan task as FAILED.
+
+    Scans cannot be safely auto-reenqueued because re-running an entire cloud scan
+    could duplicate findings and overwhelm cloud API limits. Marking them FAILED
+    allows the scan status to clear from EXECUTING and unblocks subsequent scans.
+    """
+    from api.models import Scan, StateChoices
+
+    # 1. Update scans associated via the Task -> TaskResult relation
+    Scan.all_objects.filter(
+        task__task_runner_task=task_result,
+        state__in=[
+            StateChoices.AVAILABLE,
+            StateChoices.SCHEDULED,
+            StateChoices.EXECUTING,
+        ],
+    ).update(state=StateChoices.FAILED, completed_at=now)
+
+    # 2. If scan_id was explicitly provided in task kwargs
+    try:
+        kwargs = decode_celery_field(kwargs_repr, {})
+        scan_id = kwargs.get("scan_id") if isinstance(kwargs, dict) else None
+        if scan_id:
+            Scan.all_objects.filter(
+                id=scan_id,
+                state__in=[
+                    StateChoices.AVAILABLE,
+                    StateChoices.SCHEDULED,
+                    StateChoices.EXECUTING,
+                ],
+            ).update(state=StateChoices.FAILED, completed_at=now)
+    except Exception:
+        logger.exception(
+            "Failed to decode kwargs to mark scan failed for %s",
+            task_result.task_id,
+        )
+
+
 def _recover_task(task_result, max_attempts: int, window_hours: int) -> str:
     """Recover one orphaned task. Returns 'recovered' or 'failed'."""
     # Capture name/args/kwargs now: revoking can let a worker blank the row.
@@ -251,6 +287,9 @@ def _recover_task(task_result, max_attempts: int, window_hours: int) -> str:
     task_result.status = states.REVOKED
     task_result.date_done = now
     task_result.save(update_fields=["status", "date_done"])
+
+    if name in ("scan-perform", "scan-perform-scheduled"):
+        _fail_associated_scans(task_result, now, kwargs_repr)
 
     if name not in reenqueueable_tasks():
         logger.warning(

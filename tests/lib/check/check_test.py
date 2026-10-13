@@ -441,6 +441,12 @@ class TestCheck:
             provider = test["input"]["provider"]
             assert parse_checks_from_file(check_file, provider) == test["expected"]
 
+    def test_parse_checks_from_file_error_fallback(self):
+        check_file = (
+            f"{pathlib.Path().absolute()}/tests/lib/check/fixtures/checklistA.json"
+        )
+        assert parse_checks_from_file(check_file, "non_existent_provider") == set()
+
     @mock_aws
     def test_parse_checks_from_folder(self):
         test_checks_folder = (
