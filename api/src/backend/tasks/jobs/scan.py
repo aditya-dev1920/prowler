@@ -3,6 +3,7 @@ import csv
 import gc
 import io
 import json
+import os
 import random
 import re
 import time
@@ -65,6 +66,7 @@ from django.db.models import (
     When,
 )
 from django.utils import timezone as django_timezone
+from prowler.lib.check.check import list_services
 from prowler.lib.check.models import CheckMetadata
 from prowler.lib.outputs.finding import Finding as ProwlerFinding
 from prowler.lib.scan.scan import Scan as ProwlerScan
@@ -72,6 +74,7 @@ from tasks.jobs.queries import (
     COMPLIANCE_UPSERT_PROVIDER_SCORE_SQL,
     COMPLIANCE_UPSERT_TENANT_SUMMARY_SQL,
 )
+from tasks.jobs.scan_logger import ScanExecutionLogger
 from tasks.utils import CustomEncoder, batched
 from uuid6 import uuid7
 
@@ -1334,6 +1337,15 @@ def perform_prowler_scan(
             ["state", "started_at", "updated_at"],
         )
 
+    scan_logger = ScanExecutionLogger(
+        scan_id=scan_id,
+        tenant_id=tenant_id,
+        provider_id=provider_id,
+        provider_type=provider_instance.provider,
+        provider_uid=provider_instance.uid,
+        checks_to_execute=checks_to_execute,
+    )
+
     # Find the mutelist processor if it exists
     with rls_transaction(tenant_id, using=READ_REPLICA_ALIAS):
         try:
@@ -1368,6 +1380,13 @@ def perform_prowler_scan(
                     provider_instance, mutelist_processor
                 )
                 provider_instance.connected = True
+                if scan_logger:
+                    audited_regions = getattr(prowler_provider, "regions", None)
+                    if not audited_regions and hasattr(prowler_provider, "_identity"):
+                        audited_regions = getattr(
+                            prowler_provider._identity, "audited_regions", None
+                        )
+                    scan_logger.set_audited_regions(audited_regions)
             except Exception as e:
                 provider_instance.connected = False
                 exc = ProviderConnectionError(
@@ -1389,7 +1408,47 @@ def perform_prowler_scan(
         if exc:
             raise exc
 
-        prowler_scan = ProwlerScan(provider=prowler_provider, checks=checks_to_execute)
+        # Resolve excluded services (defaulting to excluding inspector2 for AWS to prevent OOM on massive CVE catalogs)
+        excluded_services = None
+        scanner_args_excluded = (
+            scan_instance.scanner_args.get("excluded_services")
+            if isinstance(getattr(scan_instance, "scanner_args", None), dict)
+            else None
+        )
+        if scanner_args_excluded:
+            candidate_excluded = (
+                scanner_args_excluded
+                if isinstance(scanner_args_excluded, list)
+                else [scanner_args_excluded]
+            )
+        else:
+            candidate_excluded_env = os.environ.get(
+                "PROWLER_EXCLUDED_SERVICES", "inspector2"
+            )
+            candidate_excluded = [
+                s.strip().lower()
+                for s in candidate_excluded_env.split(",")
+                if s.strip()
+            ]
+
+        if candidate_excluded and hasattr(prowler_provider, "type"):
+            try:
+                valid_provider_services = set(list_services(prowler_provider.type))
+                filtered_excluded = [
+                    s for s in candidate_excluded if s in valid_provider_services
+                ]
+                if filtered_excluded:
+                    excluded_services = filtered_excluded
+            except Exception as e:
+                logger.warning(
+                    f"Could not filter excluded services for provider type {prowler_provider.type}: {e}"
+                )
+
+        prowler_scan = ProwlerScan(
+            provider=prowler_provider,
+            checks=checks_to_execute,
+            excluded_services=excluded_services,
+        )
 
         resource_cache = {}
         tag_cache = {}
@@ -1407,6 +1466,8 @@ def perform_prowler_scan(
             # Process findings in micro-batches
             findings_list = list(findings)
             total_findings = len(findings_list)
+            if scan_logger and findings_list:
+                scan_logger.record_findings_batch(findings_list)
 
             # Chunk findings into micro-batches
             for i in range(0, total_findings, FINDINGS_MICRO_BATCH_SIZE):
@@ -1438,6 +1499,8 @@ def perform_prowler_scan(
                 progress_delta >= PROGRESS_THROTTLE_DELTA
                 or elapsed >= PROGRESS_THROTTLE_SECONDS
             ):
+                if scan_logger:
+                    scan_logger.log_progress(progress)
                 with rls_transaction(tenant_id):
                     scan_instance.progress = progress
                     _save_scan_instance(
@@ -1500,6 +1563,14 @@ def perform_prowler_scan(
             except ProviderDeletedException as e:
                 logger.warning(str(e))
                 exception = e
+
+        if scan_logger:
+            scan_logger.finish(
+                state=getattr(scan_instance, "state", "UNKNOWN"),
+                duration=getattr(scan_instance, "duration", None),
+                unique_resources_count=len(unique_resources),
+                exception=exception,
+            )
 
     if exception is not None:
         raise exception
