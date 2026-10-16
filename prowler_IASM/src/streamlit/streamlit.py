@@ -458,7 +458,7 @@ status_html = (
 st.markdown(f"""
 <div class="brand-header">
     <div class="brand-title">
-        🛡️ Prowler IASM Enterprise
+        🛡️ NOPAL IASM 
         <span class="brand-badge">v1.0 Production</span>
     </div>
     <div>{status_html}</div>

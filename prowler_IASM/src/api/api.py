@@ -604,6 +604,19 @@ def view_html_report(scan_id: str):
     return FileResponse(path=str(html_path), media_type="text/html")
 
 # Scan Result Retrieval Endpoint (View CSV Report)
+@app.get("/api/v1/scans/{scan_id}/report-csv", tags=["Export & Reports"])
+def view_csv_report(scan_id: str):
+    """Serves the CSV report for a specific scan."""
+    csv_path = get_scan_dir(scan_id) / "report.csv"
+    if not csv_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"CSV report for scan '{scan_id}' not found."
+        )
+
+    return FileResponse(path=str(csv_path), media_type="text/csv")
+
+# Scan Result Retrieval Endpoint (List Scans)
 @app.get("/api/v1/scans", tags=["Scans"])
 def list_scans():
     """Lists all past and currently executing scans."""
