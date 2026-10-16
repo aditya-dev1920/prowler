@@ -1,0 +1,28 @@
+services:
+  prowler-iasm:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: prowler-iasm-service
+    restart: unless-stopped
+    ports:
+      - "8000:8000"  # FastAPI REST API & Swagger UI (/docs)
+      - "8501:8501"  # Optional Streamlit Test Dashboard
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - API_PORT=8000
+      - MAX_CONCURRENT_SCANS=2
+      - SCAN_OUTPUT_DIR=/app/scan_results
+      - CORS_ORIGINS=*
+    volumes:
+      # Persist scan reports, JSON data, and downloadable ZIP bundles on the host
+      - ./scan_results:/app/scan_results
+    deploy:
+      resources:
+        limits:
+          memory: 2048M
+        reservations:
+          memory: 128M
+

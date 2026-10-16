@@ -1,0 +1,40 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudFormation template to create a secure, read-only IAM Role for automated Prowler security assessments.'
+
+Parameters:
+  ExternalId:
+    Type: String
+    Description: 'Unique External ID provided by the platform for secure cross-account AssumeRole delegation.'
+    MinLength: 8
+    MaxLength: 128
+    AllowedPattern: '[\w+=,.@:\/-]+'
+  ScannerAccountId:
+    Type: String
+    Description: 'The AWS Account ID of your scanning platform that will assume this role.'
+    AllowedPattern: '^\d{12}$'
+
+Resources:
+  ProwlerScanRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: 'ProwlerSecurityAuditRole'
+      Description: 'Read-only security assessment role used by Prowler IASM engine.'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${ScannerAccountId}:root'
+            Action: 'sts:AssumeRole'
+            Condition:
+              StringEquals:
+                'sts:ExternalId': !Ref ExternalId
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/SecurityAudit'
+        - 'arn:aws:iam::aws:policy/job-function/ViewOnlyAccess'
+
+Outputs:
+  RoleArn:
+    Description: 'The ARN of the newly created Prowler scan role. Copy this into your platform configuration.'
+    Value: !GetAtt ProwlerScanRole.Arn
+

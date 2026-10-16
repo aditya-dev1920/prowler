@@ -1,0 +1,34 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Environment and secrets
+.env
+*.pem
+*.key
+
+# Scan Outputs & Runtime Artifacts (Crucial to prevent data leaks)
+scan_results/*
+!scan_results/.gitkeep
+output/
+*.log
+*.zip
+*.ocsf.json
+
+# IDE / Editor folders
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS specific files
+.DS_Store
+Thumbs.db
+

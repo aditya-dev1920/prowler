@@ -1,0 +1,26 @@
+# Git
+.git/
+.gitignore
+
+# Python cache & virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+
+# Local sensitive configuration (pass via docker run --env-file)
+.env
+
+# Scan output and data bundles
+scan_results/*
+!scan_results/.gitkeep
+*.zip
+*.log
+*.csv
+*.html
+
