@@ -15,9 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-# ------------------------------------------------------------------------------
 # Configuration & Logging
-# ------------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -40,9 +38,7 @@ ACTIVE_PROCESSES: Dict[str, asyncio.subprocess.Process] = {}
 # In-memory registry for live tracking; populated from disk on startup
 SCAN_REGISTRY: Dict[str, Dict[str, Any]] = {}
 
-# ------------------------------------------------------------------------------
 # Security Helpers
-# ------------------------------------------------------------------------------
 def sanitize_scan_id(scan_id: str) -> str:
     """Prevents directory traversal and shell injection via custom scan IDs."""
     if not re.match(r"^[a-zA-Z0-9_\-]+$", scan_id):
@@ -63,9 +59,7 @@ def get_scan_dir(scan_id: str) -> Path:
         )
     return target
 
-# ------------------------------------------------------------------------------
 # FastAPI App Initialization & Compliant CORS
-# ------------------------------------------------------------------------------
 app = FastAPI(
     title="Prowler IASM Microservice",
     description="Production-grade REST API for AWS Attack Surface Management & Security Compliance",
@@ -90,9 +84,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ------------------------------------------------------------------------------
 # Data Models (Pydantic)
-# ------------------------------------------------------------------------------
 class TestConnectionRequest(BaseModel):
     role_arn: Optional[str] = Field(None, description="AWS IAM Role ARN (AssumeRole mode)")
     external_id: Optional[str] = Field(None, description="External ID for AssumeRole")
@@ -137,9 +129,7 @@ class ScanStatusResponse(BaseModel):
     has_summary: bool = False
     has_bundle: bool = False
 
-# ------------------------------------------------------------------------------
 # State Persistence & Crash Recovery
-# ------------------------------------------------------------------------------
 def save_metadata(scan_id: str, data: Dict[str, Any]):
     scan_dir = get_scan_dir(scan_id)
     scan_dir.mkdir(parents=True, exist_ok=True)
@@ -177,9 +167,7 @@ def startup_event():
     load_metadata_from_disk()
     logger.info(f"Loaded {len(SCAN_REGISTRY)} scans from disk. Max concurrent scans: {MAX_CONCURRENT_SCANS}")
 
-# ------------------------------------------------------------------------------
 # Background Scan Execution Task
-# ------------------------------------------------------------------------------
 async def execute_prowler_scan(scan_id: str, req: ScanRequest):
     async with SCAN_SEMAPHORE:
         scan_dir = get_scan_dir(scan_id)
@@ -284,9 +272,8 @@ async def execute_prowler_scan(scan_id: str, req: ScanRequest):
         finally:
             save_metadata(scan_id, meta)
 
-# ------------------------------------------------------------------------------
-# REST API Endpoints
-# ------------------------------------------------------------------------------
+#### API Endpoints ####
+# Healthcheck Endpoint
 @app.get("/health", tags=["System"])
 @app.get("/api/v1/health", tags=["System"])
 def health():
@@ -301,6 +288,7 @@ def health():
         "available_slots": max(0, MAX_CONCURRENT_SCANS - active_count)
     }
 
+# Connection Check Endpoint
 @app.post("/api/v1/scans/test-connection", response_model=TestConnectionResponse, tags=["Scans"])
 async def test_connection(req: TestConnectionRequest):
     """
@@ -358,6 +346,7 @@ async def test_connection(req: TestConnectionRequest):
         duration_ms=duration_ms
     )
 
+# Run Scan Endpoint 
 @app.post("/api/v1/scans/run", response_model=ScanLaunchResponse, tags=["Scans"])
 async def trigger_scan(req: ScanRequest, background_tasks: BackgroundTasks):
     """
@@ -401,6 +390,7 @@ async def trigger_scan(req: ScanRequest, background_tasks: BackgroundTasks):
         message="Scan successfully enqueued for execution."
     )
 
+# Scan Cancellation Endpoint
 @app.post("/api/v1/scans/{scan_id}/cancel", tags=["Scans"])
 async def cancel_scan(scan_id: str):
     """Cancels an actively running or queued scan."""
@@ -424,6 +414,7 @@ async def cancel_scan(scan_id: str):
 
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Active scan '{scan_id}' not found.")
 
+# Scan Result Retrieval Endpoint (Status)
 @app.get("/api/v1/scans/{scan_id}/status", response_model=ScanStatusResponse, tags=["Scans"])
 def get_scan_status(scan_id: str):
     """Returns the live execution status and lifecycle timestamps of a scan."""
@@ -450,6 +441,7 @@ def get_scan_status(scan_id: str):
         has_bundle=meta.get("has_bundle", False)
     )
 
+# Scan Result Retrieval Endpoint (Artifacts)
 @app.get("/api/v1/scans/{scan_id}/summary", tags=["Scans"])
 def get_scan_summary(scan_id: str):
     """
@@ -472,6 +464,7 @@ def get_scan_summary(scan_id: str):
             detail="Summary report is currently being written. Please retry."
         )
 
+# Scan Result Retrieval Endpoint (Findings & Assets)
 @app.get("/api/v1/scans/{scan_id}/findings", tags=["Findings & Assets"])
 def get_scan_findings(
     scan_id: str,
@@ -534,6 +527,7 @@ def get_scan_findings(
         "findings": paginated
     }
 
+# Scan Result Retrieval Endpoint (Assets)
 @app.get("/api/v1/scans/{scan_id}/assets", tags=["Findings & Assets"])
 def get_scan_assets(
     scan_id: str,
@@ -579,6 +573,7 @@ def get_scan_assets(
         "assets": paginated
     }
 
+# Scan Result Retrieval Endpoint (Download ZIP Bundle)
 @app.get("/api/v1/scans/{scan_id}/download-zip", tags=["Export & Reports"])
 def download_scan_bundle(scan_id: str):
     """1-Click download of the complete scan bundle (.zip with JSON, CSV, and HTML reports)."""
@@ -595,6 +590,7 @@ def download_scan_bundle(scan_id: str):
         media_type="application/zip"
     )
 
+# Scan Result Retrieval Endpoint (View HTML Report)
 @app.get("/api/v1/scans/{scan_id}/report-html", tags=["Export & Reports"])
 def view_html_report(scan_id: str):
     """Serves the interactive Prowler HTML visual report."""
@@ -607,6 +603,7 @@ def view_html_report(scan_id: str):
 
     return FileResponse(path=str(html_path), media_type="text/html")
 
+# Scan Result Retrieval Endpoint (View CSV Report)
 @app.get("/api/v1/scans", tags=["Scans"])
 def list_scans():
     """Lists all past and currently executing scans."""
@@ -618,6 +615,7 @@ def list_scans():
     )
     return {"total": len(sorted_scans), "scans": sorted_scans}
 
+# Scan Result Retrieval Endpoint (Delete Scan)
 @app.delete("/api/v1/scans/{scan_id}", tags=["Scans"])
 def delete_scan(scan_id: str):
     """Deletes a scan and frees all associated disk space."""
