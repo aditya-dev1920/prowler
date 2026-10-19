@@ -8,6 +8,13 @@
 # Python code
 __pycache__
 venv/
+.venv/
+prowler/pyvenv.cfg
+prowler/Scripts/
+prowler/etc/
+prowler/lib/site-packages/
+prowler/share/
+prowler/LICENSE
 build/
 /dist/
 *.egg-info/
@@ -32,6 +39,8 @@ tags
 
 # Prowler output
 /output
+scan_logs/*.log
+api/src/backend/scan_logs/*.log
 
 # Prowler found secrets
 secrets-*/

@@ -82,6 +82,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+      start_period: 60s
 
 # The `valkey` service is a key-value store service for the Prowler application. It uses the Valkey Docker image and is configured with environment variables for the service. The service mounts a volume for persistent data storage and exposes the Valkey port for external access. The health check for the `valkey` service verifies that the service is running and accessible.
   valkey:
