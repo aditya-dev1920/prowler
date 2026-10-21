@@ -263,11 +263,18 @@ curl -X POST "http://localhost:8000/api/v1/scans/scan_4a8b9c1d2e3f/cancel"
 ## 💻 Frontend Integration Guide (React / Next.js)
 
 ```typescript
+// Optional: Configure API Key if enabled on backend
+const API_KEY = process.env.NEXT_PUBLIC_PROWLER_API_KEY || '';
+const headers: Record<string, string> = {
+  'Content-Type': 'application/json',
+  ...(API_KEY ? { 'X-API-Key': API_KEY } : {})
+};
+
 // 1. Instant Connection Test (< 500ms)
 async function testConnection(roleArn: string, externalId: string) {
   const res = await fetch('http://localhost:8000/api/v1/scans/test-connection', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify({ role_arn: roleArn, external_id: externalId })
   });
   return await res.json();
@@ -277,7 +284,7 @@ async function testConnection(roleArn: string, externalId: string) {
 async function triggerScan(roleArn: string) {
   const res = await fetch('http://localhost:8000/api/v1/scans/run', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify({ role_arn: roleArn, regions: ['us-east-1'] })
   });
   const data = await res.json();
@@ -286,15 +293,26 @@ async function triggerScan(roleArn: string) {
 
 // 3. Poll Scan Status
 async function pollStatus(scanId: string) {
-  const res = await fetch(`http://localhost:8000/api/v1/scans/${scanId}/status`);
+  const res = await fetch(`http://localhost:8000/api/v1/scans/${scanId}/status`, { headers });
   return await res.json();
 }
 
 // 4. Load Dashboard Summary
 async function loadSummary(scanId: string) {
-  const res = await fetch(`http://localhost:8000/api/v1/scans/${scanId}/summary`);
+  const res = await fetch(`http://localhost:8000/api/v1/scans/${scanId}/summary`, { headers });
   return await res.json();
 }
+```
+
+---
+
+## 🧪 Automated Testing
+
+Prowler IASM includes a full automated test suite covering the REST API, security sanitization, authentication, background workers, disk pruning, and the Python client.
+
+```bash
+# Run test suite
+python -m pytest prowler_IASM/tests -v
 ```
 
 ---

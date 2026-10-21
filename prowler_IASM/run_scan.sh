@@ -23,17 +23,17 @@ else
     exit 1
 fi
 
-# Defaults
-ROLE_ARN=""
-EXTERNAL_ID=""
-ACCESS_KEY=""
-SECRET_KEY=""
-SESSION_TOKEN=""
-REGIONS="us-east-1,ap-south-1"
+# Defaults (Credentials read securely from environment by default)
+ROLE_ARN="${ROLE_ARN:-}"
+EXTERNAL_ID="${EXTERNAL_ID:-}"
+ACCESS_KEY="${AWS_ACCESS_KEY_ID:-}"
+SECRET_KEY="${AWS_SECRET_ACCESS_KEY:-}"
+SESSION_TOKEN="${AWS_SESSION_TOKEN:-}"
+REGIONS="${DEFAULT_REGIONS:-us-east-1,ap-south-1}"
 SERVICES=""
 CHECKS=""
 SCAN_ID=""
-OUTPUT_DIR="./scan_results"
+OUTPUT_DIR="${SCAN_OUTPUT_DIR:-./scan_results}"
 FORMAT="all"  # options: zip, json, all
 TEST_CONNECTION_ONLY="false"
 
@@ -44,8 +44,8 @@ Usage: $0 [OPTIONS]
 Options:
   --role-arn <ARN>            IAM Role ARN to assume (AssumeRole mode)
   --external-id <ID>          Optional External ID for AssumeRole
-  --access-key <KEY>          AWS Access Key ID (Direct Credentials mode)
-  --secret-key <SECRET>       AWS Secret Access Key
+  --access-key <KEY>          AWS Access Key ID (Legacy CLI mode; prefer AWS_ACCESS_KEY_ID env var)
+  --secret-key <SECRET>       AWS Secret Access Key (Legacy CLI mode; prefer AWS_SECRET_ACCESS_KEY env var)
   --session-token <TOKEN>     Optional AWS Session Token
   --regions <reg1,reg2>       Comma-separated AWS regions (default: us-east-1,ap-south-1)
   --services <svc1,svc2>      Comma-separated AWS services to scan (e.g., s3,iam,ec2)
@@ -64,8 +64,12 @@ while [[ "$#" -gt 0 ]]; do
     case "$1" in
         --role-arn) ROLE_ARN="$2"; shift 2 ;;
         --external-id) EXTERNAL_ID="$2"; shift 2 ;;
-        --access-key) ACCESS_KEY="$2"; shift 2 ;;
-        --secret-key) SECRET_KEY="$2"; shift 2 ;;
+        --access-key)
+            echo "[SECURITY WARNING] Passing credentials via CLI arguments exposes them in the system process table. Use AWS_ACCESS_KEY_ID environment variable instead." >&2
+            ACCESS_KEY="$2"; shift 2 ;;
+        --secret-key)
+            echo "[SECURITY WARNING] Passing credentials via CLI arguments exposes them in the system process table. Use AWS_SECRET_ACCESS_KEY environment variable instead." >&2
+            SECRET_KEY="$2"; shift 2 ;;
         --session-token) SESSION_TOKEN="$2"; shift 2 ;;
         --regions) REGIONS="$2"; shift 2 ;;
         --services) SERVICES="$2"; shift 2 ;;

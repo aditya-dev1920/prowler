@@ -32,9 +32,22 @@ Resources:
       ManagedPolicyArns:
         - 'arn:aws:iam::aws:policy/SecurityAudit'
         - 'arn:aws:iam::aws:policy/job-function/ViewOnlyAccess'
+      Policies:
+        - PolicyName: 'ProwlerSupplementalReadPermissions'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: 'ProwlerSupplementalReadOnlyAudit'
+                Effect: Allow
+                Action:
+                  - 'account:GetAlternateContact'
+                  - 'account:GetContactInformation'
+                  - 'support:DescribeCases'
+                  - 'support:DescribeSeverityLevels'
+                  - 'macie2:GetMacieSession'
+                Resource: '*'
 
 Outputs:
   RoleArn:
     Description: 'The ARN of the newly created Prowler scan role. Copy this into your platform configuration.'
     Value: !GetAtt ProwlerScanRole.Arn
-

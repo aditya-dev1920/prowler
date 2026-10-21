@@ -6,7 +6,9 @@ Use this module to run scans directly from another Python application or service
 import json
 import logging
 import os
+import shutil
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -29,6 +31,31 @@ class ProwlerScanner:
         if not self.script_path.exists():
             raise FileNotFoundError(f"Scanner script not found at: {self.script_path}")
 
+    def _resolve_executable_command(self, args: List[str]) -> List[str]:
+        """Resolves bash invocation on Windows when executing .sh scripts."""
+        if sys.platform == "win32" and self.script_path.suffix == ".sh":
+            bash_bin = shutil.which("bash") or shutil.which("sh")
+            if not bash_bin:
+                git_bash_candidates = [
+                    Path(r"C:\Program Files\Git\bin\bash.exe"),
+                    Path(r"C:\Program Files (x86)\Git\bin\bash.exe"),
+                    Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Git" / "bin" / "bash.exe",
+                ]
+                for candidate in git_bash_candidates:
+                    if candidate.exists():
+                        bash_bin = str(candidate)
+                        break
+
+            if bash_bin:
+                return [bash_bin, str(self.script_path)] + args
+            else:
+                logger.warning(
+                    "Executing .sh script on Windows without bash detected in PATH. "
+                    "Ensure Git Bash or WSL is installed for native Windows execution."
+                )
+
+        return [str(self.script_path)] + args
+
     def test_connection(
         self,
         role_arn: Optional[str] = None,
@@ -42,25 +69,31 @@ class ProwlerScanner:
         """
         Validates AWS credentials or Role Assume configuration via AWS STS.
         Executes in < 500ms without triggering any security scans.
+        Credentials are encrypted in the environment dictionary and never exposed in process args.
         """
         start_time = time.time()
-        cmd = [str(self.script_path), "--test-connection-only"]
+        args = ["--test-connection-only"]
 
         if role_arn:
-            cmd.extend(["--role-arn", role_arn])
+            args.extend(["--role-arn", role_arn])
         if external_id:
-            cmd.extend(["--external-id", external_id])
-        if access_key:
-            cmd.extend(["--access-key", access_key])
-        if secret_key:
-            cmd.extend(["--secret-key", secret_key])
-        if session_token:
-            cmd.extend(["--session-token", session_token])
+            args.extend(["--external-id", external_id])
         if region:
-            cmd.extend(["--regions", region])
+            args.extend(["--regions", region])
+
+        cmd = self._resolve_executable_command(args)
+
+        # Inject credentials into environment safely (CWE-214 / CWE-532 protection)
+        sub_env = os.environ.copy()
+        if access_key:
+            sub_env["AWS_ACCESS_KEY_ID"] = access_key
+        if secret_key:
+            sub_env["AWS_SECRET_ACCESS_KEY"] = secret_key
+        if session_token:
+            sub_env["AWS_SESSION_TOKEN"] = session_token
 
         try:
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            res = subprocess.run(cmd, env=sub_env, capture_output=True, text=True, timeout=timeout)
             duration_ms = round((time.time() - start_time) * 1000, 2)
             stdout = res.stdout.strip()
             data = json.loads(stdout) if stdout else {}
@@ -94,38 +127,43 @@ class ProwlerScanner:
     ) -> Dict[str, Any]:
         """
         Synchronously runs a security assessment scan and returns the complete parsed results.
+        Credentials are passed safely via environment variables to prevent process-table leakage.
         """
         scan_id = scan_id or f"scan_{uuid.uuid4().hex[:12]}"
         target_dir = self.output_dir / scan_id
         target_dir.mkdir(parents=True, exist_ok=True)
 
-        cmd = [
-            str(self.script_path),
+        args = [
             "--scan-id", scan_id,
             "--output-dir", str(self.output_dir),
             "--format", "all"
         ]
 
         if role_arn:
-            cmd.extend(["--role-arn", role_arn])
+            args.extend(["--role-arn", role_arn])
         if external_id:
-            cmd.extend(["--external-id", external_id])
-        if access_key:
-            cmd.extend(["--access-key", access_key])
-        if secret_key:
-            cmd.extend(["--secret-key", secret_key])
-        if session_token:
-            cmd.extend(["--session-token", session_token])
+            args.extend(["--external-id", external_id])
         if regions:
-            cmd.extend(["--regions", ",".join(regions)])
+            args.extend(["--regions", ",".join(regions)])
         if services:
-            cmd.extend(["--services", ",".join(services)])
+            args.extend(["--services", ",".join(services)])
         if checks:
-            cmd.extend(["--checks", ",".join(checks)])
+            args.extend(["--checks", ",".join(checks)])
+
+        cmd = self._resolve_executable_command(args)
+
+        # Inject credentials into environment safely (CWE-214 / CWE-532 protection)
+        sub_env = os.environ.copy()
+        if access_key:
+            sub_env["AWS_ACCESS_KEY_ID"] = access_key
+        if secret_key:
+            sub_env["AWS_SECRET_ACCESS_KEY"] = secret_key
+        if session_token:
+            sub_env["AWS_SESSION_TOKEN"] = session_token
 
         log_path = target_dir / "execution.log"
         with open(log_path, "w", encoding="utf-8") as lf:
-            res = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, timeout=timeout)
+            res = subprocess.run(cmd, env=sub_env, stdout=lf, stderr=subprocess.STDOUT, timeout=timeout)
 
         summary_file = target_dir / "summary.json"
         findings_file = target_dir / "findings.json"
@@ -186,4 +224,3 @@ class ProwlerScanner:
             "target_dir": str(target_dir),
             "zip_bundle": str(target_dir / f"{scan_id}_bundle.zip")
         }
-

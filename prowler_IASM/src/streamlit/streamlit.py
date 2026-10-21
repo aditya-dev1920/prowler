@@ -15,13 +15,14 @@ import streamlit as st
 # 1. Page Configuration & Custom Theme
 # ------------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Prowler IASM Enterprise",
+    page_title="Nopal IASM - Cloud Security Posture Management",
     page_icon="🛡️",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 DEFAULT_API_URL = os.getenv("API_BASE_URL", "http://localhost:8000").rstrip("/")
+DEFAULT_API_KEY = os.getenv("API_KEY", "").strip()
 
 # ------------------------------------------------------------------------------
 # 2. Premium Enterprise CSS Styles & Smooth Animations
@@ -317,11 +318,17 @@ SAMPLE_DEMO_DATA = {
 # ------------------------------------------------------------------------------
 # 4. High-Performance Caching Helpers (Zero Lag on UI Interactions)
 # ------------------------------------------------------------------------------
+def get_auth_headers(api_key: Optional[str] = None) -> Dict[str, str]:
+    """Builds authentication headers with X-API-Key if key is provided."""
+    key = api_key if api_key is not None else st.session_state.get("api_key", "")
+    return {"X-API-Key": key.strip()} if key and key.strip() else {}
+
 @st.cache_data(ttl=5, show_spinner=False)
-def fetch_api_health(url: str) -> Dict[str, Any]:
+def fetch_api_health(url: str, api_key: str = "") -> Dict[str, Any]:
     """Cached health check to prevent 1.5s timeout freezes when backend is offline."""
     try:
-        res = requests.get(f"{url}/health", timeout=0.8)
+        headers = {"X-API-Key": api_key.strip()} if api_key.strip() else {}
+        res = requests.get(f"{url}/health", headers=headers, timeout=0.8)
         if res.status_code == 200:
             return {"online": True, "data": res.json()}
     except Exception:
@@ -329,19 +336,20 @@ def fetch_api_health(url: str) -> Dict[str, Any]:
     return {"online": False, "data": {}}
 
 @st.cache_data(ttl=15, show_spinner=False)
-def fetch_scan_dataset(url: str, scan_id: str) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+def fetch_scan_dataset(url: str, scan_id: str, api_key: str = "") -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Caches scan results in memory so tab navigation and filtering are instant (0ms)."""
     summary = None
     findings = []
     assets = []
+    headers = {"X-API-Key": api_key.strip()} if api_key.strip() else {}
     try:
-        s_res = requests.get(f"{url}/api/v1/scans/{scan_id}/summary", timeout=5)
+        s_res = requests.get(f"{url}/api/v1/scans/{scan_id}/summary", headers=headers, timeout=5)
         if s_res.status_code == 200:
             summary = s_res.json()
-        f_res = requests.get(f"{url}/api/v1/scans/{scan_id}/findings?limit=500", timeout=8)
+        f_res = requests.get(f"{url}/api/v1/scans/{scan_id}/findings?limit=500", headers=headers, timeout=8)
         if f_res.status_code == 200:
             findings = f_res.json().get("findings", [])
-        a_res = requests.get(f"{url}/api/v1/scans/{scan_id}/assets?limit=500", timeout=8)
+        a_res = requests.get(f"{url}/api/v1/scans/{scan_id}/assets?limit=500", headers=headers, timeout=8)
         if a_res.status_code == 200:
             assets = a_res.json().get("assets", [])
     except Exception:
@@ -357,6 +365,8 @@ if "is_scanning" not in st.session_state:
     st.session_state["is_scanning"] = False
 if "api_endpoint" not in st.session_state:
     st.session_state["api_endpoint"] = DEFAULT_API_URL
+if "api_key" not in st.session_state:
+    st.session_state["api_key"] = DEFAULT_API_KEY
 
 # ------------------------------------------------------------------------------
 # 5. Sidebar Controls & Credentials Configuration
@@ -377,6 +387,15 @@ with st.sidebar:
         endpoint_input = st.text_input("Microservice Endpoint", value=st.session_state["api_endpoint"]).rstrip("/")
         st.session_state["api_endpoint"] = endpoint_input
         current_api_url = endpoint_input
+
+        api_key_input = st.text_input(
+            "API Key (Optional)",
+            value=st.session_state["api_key"],
+            type="password",
+            help="Configured X-API-Key for secure enterprise API access."
+        ).strip()
+        st.session_state["api_key"] = api_key_input
+        current_api_key = api_key_input
 
         st.markdown("#### 1. AWS Authentication")
         auth_mode = st.radio(
@@ -426,7 +445,12 @@ with st.sidebar:
             }
             with st.spinner("Executing AWS STS GetCallerIdentity..."):
                 try:
-                    res = requests.post(f"{current_api_url}/api/v1/scans/test-connection", json=test_payload, timeout=10)
+                    res = requests.post(
+                        f"{current_api_url}/api/v1/scans/test-connection",
+                        json=test_payload,
+                        headers=get_auth_headers(current_api_key),
+                        timeout=10
+                    )
                     if res.status_code == 200:
                         data = res.json()
                         if data.get("status") in ("success", "connected"):
@@ -440,13 +464,14 @@ with st.sidebar:
                     st.error(f"Connection Error: {e}")
     else:
         current_api_url = st.session_state["api_endpoint"]
+        current_api_key = st.session_state.get("api_key", "")
         st.info("💡 **Demo Mode Active**: Displaying realistic enterprise cloud audit data.")
         st.markdown("**Target Cloud:** AWS Production Infrastructure\n**Account ID:** `849204128941`\n**Regions:** `us-east-1, ap-south-1`")
 
 # ------------------------------------------------------------------------------
 # 6. Top Brand Header Bar
 # ------------------------------------------------------------------------------
-health_info = fetch_api_health(current_api_url)
+health_info = fetch_api_health(current_api_url, current_api_key)
 api_online = health_info["online"]
 
 status_html = (
@@ -489,7 +514,12 @@ with col_launch:
                     "services": selected_services if selected_services else None,
                 }
                 try:
-                    launch_res = requests.post(f"{current_api_url}/api/v1/scans/run", json=scan_payload, timeout=10)
+                    launch_res = requests.post(
+                        f"{current_api_url}/api/v1/scans/run",
+                        json=scan_payload,
+                        headers=get_auth_headers(current_api_key),
+                        timeout=10
+                    )
                     if launch_res.status_code == 200:
                         scan_id = launch_res.json()["scan_id"]
                         st.session_state["active_scan_id"] = scan_id
@@ -508,7 +538,11 @@ with col_launch:
 with col_history:
     if not st.session_state["demo_mode"]:
         try:
-            scans_res = requests.get(f"{current_api_url}/api/v1/scans", timeout=3)
+            scans_res = requests.get(
+                f"{current_api_url}/api/v1/scans",
+                headers=get_auth_headers(current_api_key),
+                timeout=3
+            )
             if scans_res.status_code == 200:
                 past_scans = [s["scan_id"] for s in scans_res.json().get("scans", [])]
                 if past_scans:
@@ -539,7 +573,11 @@ if st.session_state.get("is_scanning") and st.session_state.get("active_scan_id"
     with cancel_btn_col:
         if st.button("⏹️ Cancel Active Scan", type="secondary", use_container_width=True):
             try:
-                requests.post(f"{current_api_url}/api/v1/scans/{scan_id}/cancel", timeout=5)
+                requests.post(
+                    f"{current_api_url}/api/v1/scans/{scan_id}/cancel",
+                    headers=get_auth_headers(current_api_key),
+                    timeout=5
+                )
             except Exception:
                 pass
             st.session_state["is_scanning"] = False
@@ -559,7 +597,11 @@ if st.session_state.get("is_scanning") and st.session_state.get("active_scan_id"
         time.sleep(2.5)
         elapsed = int(time.time() - start_time)
         try:
-            st_res = requests.get(f"{current_api_url}/api/v1/scans/{scan_id}/status", timeout=5)
+            st_res = requests.get(
+                f"{current_api_url}/api/v1/scans/{scan_id}/status",
+                headers=get_auth_headers(current_api_key),
+                timeout=5
+            )
             if st_res.status_code == 200:
                 s_data = st_res.json()
                 curr_status = s_data.get("status")
@@ -599,7 +641,7 @@ if st.session_state["demo_mode"]:
     findings_data = SAMPLE_DEMO_DATA["findings"]
     assets_data = SAMPLE_DEMO_DATA["assets"]
 elif active_id:
-    summary_data, findings_data, assets_data = fetch_scan_dataset(current_api_url, active_id)
+    summary_data, findings_data, assets_data = fetch_scan_dataset(current_api_url, active_id, current_api_key)
 
 if summary_data:
     st.markdown("---")
@@ -926,7 +968,8 @@ if summary_data:
             </div>
             """, unsafe_allow_html=True)
             if not st.session_state["demo_mode"] and active_id:
-                st.link_button("⬇️ Download .ZIP Bundle", f"{current_api_url}/api/v1/scans/{active_id}/download-zip", use_container_width=True)
+                auth_param = f"?api_key={current_api_key}" if current_api_key else ""
+                st.link_button("⬇️ Download .ZIP Bundle", f"{current_api_url}/api/v1/scans/{active_id}/download-zip{auth_param}", use_container_width=True)
             else:
                 demo_zip_bytes = json.dumps(SAMPLE_DEMO_DATA, indent=2).encode('utf-8')
                 st.download_button("⬇️ Download Demo Archive (JSON)", data=demo_zip_bytes, file_name="prowler_demo_bundle.json", mime="application/json", use_container_width=True)
@@ -940,7 +983,8 @@ if summary_data:
             </div>
             """, unsafe_allow_html=True)
             if not st.session_state["demo_mode"] and active_id:
-                st.link_button("🌐 Open HTML Report", f"{current_api_url}/api/v1/scans/{active_id}/report-html", use_container_width=True)
+                auth_param = f"?api_key={current_api_key}" if current_api_key else ""
+                st.link_button("🌐 Open HTML Report", f"{current_api_url}/api/v1/scans/{active_id}/report-html{auth_param}", use_container_width=True)
             else:
                 st.button("🌐 Open HTML Report (Online Scans Only)", disabled=True, use_container_width=True)
 

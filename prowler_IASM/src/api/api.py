@@ -3,16 +3,20 @@ import json
 import logging
 import os
 import re
+import secrets
 import shutil
+import signal
+import sys
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, status
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Security, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 
 # Configuration & Logging
@@ -31,12 +35,78 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 MAX_CONCURRENT_SCANS = int(os.getenv("MAX_CONCURRENT_SCANS", "2"))
 SCAN_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_SCANS)
 SCAN_TIMEOUT_SECONDS = int(os.getenv("SCAN_TIMEOUT_SECONDS", "3600"))
+SCAN_RETENTION_DAYS = int(os.getenv("SCAN_RETENTION_DAYS", "30"))
 
 # Active subprocess registry for abort/cancel capability
 ACTIVE_PROCESSES: Dict[str, asyncio.subprocess.Process] = {}
 
 # In-memory registry for live tracking; populated from disk on startup
 SCAN_REGISTRY: Dict[str, Dict[str, Any]] = {}
+
+# API Key Security Authentication
+API_KEY = os.getenv("API_KEY", "").strip()
+API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+async def verify_api_key(api_key: Optional[str] = Security(API_KEY_HEADER)) -> bool:
+    """
+    Validates API key from X-API-Key header.
+    If API_KEY is unset in the environment, allows requests (development/internal mode).
+    If API_KEY is configured, enforces constant-time comparison.
+    """
+    if not API_KEY:
+        return True
+    if not api_key or not secrets.compare_digest(api_key, API_KEY):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing X-API-Key authentication header."
+        )
+    return True
+
+# Process Lifecycle & Group Termination Helpers
+def get_subprocess_spawn_kwargs() -> Dict[str, Any]:
+    """Returns platform-specific options for launching child processes in dedicated process groups."""
+    kwargs: Dict[str, Any] = {}
+    if sys.platform != "win32" and hasattr(os, "setsid"):
+        kwargs["preexec_fn"] = os.setsid
+    return kwargs
+
+def terminate_process_tree(proc: asyncio.subprocess.Process) -> None:
+    """Gracefully terminates the entire process tree (bash wrapper + prowler children)."""
+    try:
+        if sys.platform != "win32" and hasattr(os, "killpg") and hasattr(os, "getpgid"):
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        else:
+            proc.terminate()
+    except (ProcessLookupError, PermissionError):
+        pass
+
+def kill_process_tree(proc: asyncio.subprocess.Process) -> None:
+    """Forcefully kills the entire process tree."""
+    try:
+        if sys.platform != "win32" and hasattr(os, "killpg") and hasattr(os, "getpgid"):
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        else:
+            proc.kill()
+    except (ProcessLookupError, PermissionError):
+        pass
+
+def resolve_script_command(args: List[str]) -> List[str]:
+    """Resolves bash command prefix when executing .sh files on Windows."""
+    if sys.platform == "win32" and RUN_SCAN_SCRIPT.suffix == ".sh":
+        bash_bin = shutil.which("bash") or shutil.which("sh")
+        if not bash_bin:
+            git_bash_candidates = [
+                Path(r"C:\Program Files\Git\bin\bash.exe"),
+                Path(r"C:\Program Files (x86)\Git\bin\bash.exe"),
+                Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Git" / "bin" / "bash.exe",
+            ]
+            for candidate in git_bash_candidates:
+                if candidate.exists():
+                    bash_bin = str(candidate)
+                    break
+        if bash_bin:
+            return [bash_bin, str(RUN_SCAN_SCRIPT)] + args
+    return [str(RUN_SCAN_SCRIPT)] + args
 
 # Security Helpers
 def sanitize_scan_id(scan_id: str) -> str:
@@ -63,7 +133,7 @@ def get_scan_dir(scan_id: str) -> Path:
 app = FastAPI(
     title="Prowler IASM Microservice",
     description="Production-grade REST API for AWS Attack Surface Management & Security Compliance",
-    version="1.0.0",
+    version="1.1.0",
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -129,13 +199,45 @@ class ScanStatusResponse(BaseModel):
     has_summary: bool = False
     has_bundle: bool = False
 
-# State Persistence & Crash Recovery
+# State Persistence & Disk Pruning
 def save_metadata(scan_id: str, data: Dict[str, Any]):
     scan_dir = get_scan_dir(scan_id)
     scan_dir.mkdir(parents=True, exist_ok=True)
     meta_path = scan_dir / "metadata.json"
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
+
+def prune_expired_scans():
+    """Removes scan directories older than SCAN_RETENTION_DAYS."""
+    if SCAN_RETENTION_DAYS <= 0 or not OUTPUT_DIR.exists():
+        return
+    now_utc = datetime.now(timezone.utc)
+    now_ts = time.time()
+    retention_seconds = SCAN_RETENTION_DAYS * 86400
+
+    for item in OUTPUT_DIR.iterdir():
+        if item.is_dir():
+            meta_path = item / "metadata.json"
+            should_prune = False
+            if meta_path.exists():
+                try:
+                    with open(meta_path, "r", encoding="utf-8") as f:
+                        meta = json.load(f)
+                    completed_at = meta.get("completed_at")
+                    if completed_at:
+                        comp_dt = datetime.fromisoformat(completed_at)
+                        if (now_utc - comp_dt).total_seconds() > retention_seconds:
+                            should_prune = True
+                except Exception:
+                    pass
+            else:
+                if (now_ts - item.stat().st_mtime) > retention_seconds:
+                    should_prune = True
+
+            if should_prune:
+                logger.info(f"Pruning expired scan directory: {item.name} (> {SCAN_RETENTION_DAYS} days old)")
+                shutil.rmtree(item, ignore_errors=True)
+                SCAN_REGISTRY.pop(item.name, None)
 
 def load_metadata_from_disk():
     """Restores scan registry from disk and reconciles interrupted scans."""
@@ -165,7 +267,9 @@ def load_metadata_from_disk():
 def startup_event():
     logger.info("Initializing Prowler IASM Microservice...")
     load_metadata_from_disk()
-    logger.info(f"Loaded {len(SCAN_REGISTRY)} scans from disk. Max concurrent scans: {MAX_CONCURRENT_SCANS}")
+    prune_expired_scans()
+    auth_mode = "API Key Enforced" if API_KEY else "Open Access (No API Key configured)"
+    logger.info(f"Loaded {len(SCAN_REGISTRY)} scans from disk. Max concurrent scans: {MAX_CONCURRENT_SCANS}. Auth: {auth_mode}")
 
 # Background Scan Execution Task
 async def execute_prowler_scan(scan_id: str, req: ScanRequest):
@@ -182,37 +286,45 @@ async def execute_prowler_scan(scan_id: str, req: ScanRequest):
 
         start_time = time.time()
 
-        # Build command arguments for run_scan.sh
-        cmd = [
-            str(RUN_SCAN_SCRIPT),
+        # Build command arguments for run_scan.sh (NEVER include credentials in CLI args)
+        args = [
             "--scan-id", scan_id,
             "--output-dir", str(OUTPUT_DIR),
             "--format", "all"
         ]
 
         if req.role_arn:
-            cmd.extend(["--role-arn", req.role_arn])
+            args.extend(["--role-arn", req.role_arn])
         if req.external_id:
-            cmd.extend(["--external-id", req.external_id])
-        if req.access_key:
-            cmd.extend(["--access-key", req.access_key])
-        if req.secret_key:
-            cmd.extend(["--secret-key", req.secret_key])
-        if req.session_token:
-            cmd.extend(["--session-token", req.session_token])
+            args.extend(["--external-id", req.external_id])
         if req.regions:
-            cmd.extend(["--regions", ",".join(req.regions)])
+            args.extend(["--regions", ",".join(req.regions)])
         if req.services:
-            cmd.extend(["--services", ",".join(req.services)])
+            args.extend(["--services", ",".join(req.services)])
         if req.checks:
-            cmd.extend(["--checks", ",".join(req.checks)])
+            args.extend(["--checks", ",".join(req.checks)])
+
+        cmd = resolve_script_command(args)
+
+        # Inject credentials into environment safely (CWE-214 / CWE-532 protection)
+        sub_env = os.environ.copy()
+        if req.access_key:
+            sub_env["AWS_ACCESS_KEY_ID"] = req.access_key
+        if req.secret_key:
+            sub_env["AWS_SECRET_ACCESS_KEY"] = req.secret_key
+        if req.session_token:
+            sub_env["AWS_SESSION_TOKEN"] = req.session_token
+
+        spawn_kwargs = get_subprocess_spawn_kwargs()
 
         try:
             with open(log_file, "w", encoding="utf-8") as lf:
                 process = await asyncio.create_subprocess_exec(
                     *cmd,
+                    env=sub_env,
                     stdout=lf,
-                    stderr=asyncio.subprocess.STDOUT
+                    stderr=asyncio.subprocess.STDOUT,
+                    **spawn_kwargs
                 )
                 ACTIVE_PROCESSES[scan_id] = process
 
@@ -220,12 +332,12 @@ async def execute_prowler_scan(scan_id: str, req: ScanRequest):
                 try:
                     return_code = await asyncio.wait_for(process.wait(), timeout=SCAN_TIMEOUT_SECONDS)
                 except asyncio.TimeoutError:
-                    logger.error(f"Scan [{scan_id}] exceeded timeout limit of {SCAN_TIMEOUT_SECONDS}s. Terminating.")
-                    process.terminate()
+                    logger.error(f"Scan [{scan_id}] exceeded timeout limit of {SCAN_TIMEOUT_SECONDS}s. Terminating process tree.")
+                    terminate_process_tree(process)
                     try:
                         await asyncio.wait_for(process.wait(), timeout=5.0)
                     except asyncio.TimeoutError:
-                        process.kill()
+                        kill_process_tree(process)
                     return_code = -9
                     meta["error_message"] = f"Scan timed out after {SCAN_TIMEOUT_SECONDS} seconds."
 
@@ -273,7 +385,8 @@ async def execute_prowler_scan(scan_id: str, req: ScanRequest):
             save_metadata(scan_id, meta)
 
 #### API Endpoints ####
-# Healthcheck Endpoint
+
+# Healthcheck Endpoint (Public)
 @app.get("/health", tags=["System"])
 @app.get("/api/v1/health", tags=["System"])
 def health():
@@ -285,41 +398,56 @@ def health():
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "active_scans_running": active_count,
         "max_concurrent_scans": MAX_CONCURRENT_SCANS,
-        "available_slots": max(0, MAX_CONCURRENT_SCANS - active_count)
+        "available_slots": max(0, MAX_CONCURRENT_SCANS - active_count),
+        "auth_enabled": bool(API_KEY)
     }
 
 # Connection Check Endpoint
-@app.post("/api/v1/scans/test-connection", response_model=TestConnectionResponse, tags=["Scans"])
+@app.post(
+    "/api/v1/scans/test-connection",
+    response_model=TestConnectionResponse,
+    dependencies=[Depends(verify_api_key)],
+    tags=["Scans"]
+)
 async def test_connection(req: TestConnectionRequest):
     """
     Validates AWS credentials or Role Assume configuration via AWS STS.
     Executes in < 500ms without triggering any security scans.
+    Credentials are encrypted in the environment dictionary and never exposed in process args.
     """
     start_time = time.time()
-    cmd = [str(RUN_SCAN_SCRIPT), "--test-connection-only"]
+    args = ["--test-connection-only"]
 
     if req.role_arn:
-        cmd.extend(["--role-arn", req.role_arn])
+        args.extend(["--role-arn", req.role_arn])
     if req.external_id:
-        cmd.extend(["--external-id", req.external_id])
-    if req.access_key:
-        cmd.extend(["--access-key", req.access_key])
-    if req.secret_key:
-        cmd.extend(["--secret-key", req.secret_key])
-    if req.session_token:
-        cmd.extend(["--session-token", req.session_token])
+        args.extend(["--external-id", req.external_id])
     if req.region:
-        cmd.extend(["--regions", req.region])
+        args.extend(["--regions", req.region])
+
+    cmd = resolve_script_command(args)
+
+    sub_env = os.environ.copy()
+    if req.access_key:
+        sub_env["AWS_ACCESS_KEY_ID"] = req.access_key
+    if req.secret_key:
+        sub_env["AWS_SECRET_ACCESS_KEY"] = req.secret_key
+    if req.session_token:
+        sub_env["AWS_SESSION_TOKEN"] = req.session_token
+
+    spawn_kwargs = get_subprocess_spawn_kwargs()
 
     process = await asyncio.create_subprocess_exec(
         *cmd,
+        env=sub_env,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
+        stderr=asyncio.subprocess.PIPE,
+        **spawn_kwargs
     )
     try:
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=15.0)
     except asyncio.TimeoutError:
-        process.kill()
+        kill_process_tree(process)
         return TestConnectionResponse(
             status="error",
             message="Connection verification timed out after 15 seconds.",
@@ -347,7 +475,12 @@ async def test_connection(req: TestConnectionRequest):
     )
 
 # Run Scan Endpoint 
-@app.post("/api/v1/scans/run", response_model=ScanLaunchResponse, tags=["Scans"])
+@app.post(
+    "/api/v1/scans/run",
+    response_model=ScanLaunchResponse,
+    dependencies=[Depends(verify_api_key)],
+    tags=["Scans"]
+)
 async def trigger_scan(req: ScanRequest, background_tasks: BackgroundTasks):
     """
     Triggers an asynchronous Prowler Attack Surface Management scan.
@@ -391,17 +524,21 @@ async def trigger_scan(req: ScanRequest, background_tasks: BackgroundTasks):
     )
 
 # Scan Cancellation Endpoint
-@app.post("/api/v1/scans/{scan_id}/cancel", tags=["Scans"])
+@app.post(
+    "/api/v1/scans/{scan_id}/cancel",
+    dependencies=[Depends(verify_api_key)],
+    tags=["Scans"]
+)
 async def cancel_scan(scan_id: str):
-    """Cancels an actively running or queued scan."""
+    """Cancels an actively running or queued scan and terminates its process tree."""
     sanitize_scan_id(scan_id)
     proc = ACTIVE_PROCESSES.get(scan_id)
     if proc:
-        proc.terminate()
+        terminate_process_tree(proc)
         try:
             await asyncio.wait_for(proc.wait(), timeout=3.0)
         except asyncio.TimeoutError:
-            proc.kill()
+            kill_process_tree(proc)
         ACTIVE_PROCESSES.pop(scan_id, None)
 
     if scan_id in SCAN_REGISTRY:
@@ -415,7 +552,12 @@ async def cancel_scan(scan_id: str):
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Active scan '{scan_id}' not found.")
 
 # Scan Result Retrieval Endpoint (Status)
-@app.get("/api/v1/scans/{scan_id}/status", response_model=ScanStatusResponse, tags=["Scans"])
+@app.get(
+    "/api/v1/scans/{scan_id}/status",
+    response_model=ScanStatusResponse,
+    dependencies=[Depends(verify_api_key)],
+    tags=["Scans"]
+)
 def get_scan_status(scan_id: str):
     """Returns the live execution status and lifecycle timestamps of a scan."""
     sanitize_scan_id(scan_id)
@@ -442,7 +584,11 @@ def get_scan_status(scan_id: str):
     )
 
 # Scan Result Retrieval Endpoint (Artifacts)
-@app.get("/api/v1/scans/{scan_id}/summary", tags=["Scans"])
+@app.get(
+    "/api/v1/scans/{scan_id}/summary",
+    dependencies=[Depends(verify_api_key)],
+    tags=["Scans"]
+)
 def get_scan_summary(scan_id: str):
     """
     Returns high-level KPI cards data: Security Score, severity distribution,
@@ -465,7 +611,11 @@ def get_scan_summary(scan_id: str):
         )
 
 # Scan Result Retrieval Endpoint (Findings & Assets)
-@app.get("/api/v1/scans/{scan_id}/findings", tags=["Findings & Assets"])
+@app.get(
+    "/api/v1/scans/{scan_id}/findings",
+    dependencies=[Depends(verify_api_key)],
+    tags=["Findings & Assets"]
+)
 def get_scan_findings(
     scan_id: str,
     status_filter: Optional[str] = Query(None, alias="status", description="Filter by PASS, FAIL, MUTED"),
@@ -528,7 +678,11 @@ def get_scan_findings(
     }
 
 # Scan Result Retrieval Endpoint (Assets)
-@app.get("/api/v1/scans/{scan_id}/assets", tags=["Findings & Assets"])
+@app.get(
+    "/api/v1/scans/{scan_id}/assets",
+    dependencies=[Depends(verify_api_key)],
+    tags=["Findings & Assets"]
+)
 def get_scan_assets(
     scan_id: str,
     service_filter: Optional[str] = Query(None, alias="service"),
@@ -574,7 +728,11 @@ def get_scan_assets(
     }
 
 # Scan Result Retrieval Endpoint (Download ZIP Bundle)
-@app.get("/api/v1/scans/{scan_id}/download-zip", tags=["Export & Reports"])
+@app.get(
+    "/api/v1/scans/{scan_id}/download-zip",
+    dependencies=[Depends(verify_api_key)],
+    tags=["Export & Reports"]
+)
 def download_scan_bundle(scan_id: str):
     """1-Click download of the complete scan bundle (.zip with JSON, CSV, and HTML reports)."""
     zip_path = get_scan_dir(scan_id) / f"{scan_id}_bundle.zip"
@@ -591,7 +749,11 @@ def download_scan_bundle(scan_id: str):
     )
 
 # Scan Result Retrieval Endpoint (View HTML Report)
-@app.get("/api/v1/scans/{scan_id}/report-html", tags=["Export & Reports"])
+@app.get(
+    "/api/v1/scans/{scan_id}/report-html",
+    dependencies=[Depends(verify_api_key)],
+    tags=["Export & Reports"]
+)
 def view_html_report(scan_id: str):
     """Serves the interactive Prowler HTML visual report."""
     html_path = get_scan_dir(scan_id) / "report.html"
@@ -604,7 +766,11 @@ def view_html_report(scan_id: str):
     return FileResponse(path=str(html_path), media_type="text/html")
 
 # Scan Result Retrieval Endpoint (View CSV Report)
-@app.get("/api/v1/scans/{scan_id}/report-csv", tags=["Export & Reports"])
+@app.get(
+    "/api/v1/scans/{scan_id}/report-csv",
+    dependencies=[Depends(verify_api_key)],
+    tags=["Export & Reports"]
+)
 def view_csv_report(scan_id: str):
     """Serves the CSV report for a specific scan."""
     csv_path = get_scan_dir(scan_id) / "report.csv"
@@ -617,7 +783,11 @@ def view_csv_report(scan_id: str):
     return FileResponse(path=str(csv_path), media_type="text/csv")
 
 # Scan Result Retrieval Endpoint (List Scans)
-@app.get("/api/v1/scans", tags=["Scans"])
+@app.get(
+    "/api/v1/scans",
+    dependencies=[Depends(verify_api_key)],
+    tags=["Scans"]
+)
 def list_scans():
     """Lists all past and currently executing scans."""
     load_metadata_from_disk()
@@ -629,7 +799,11 @@ def list_scans():
     return {"total": len(sorted_scans), "scans": sorted_scans}
 
 # Scan Result Retrieval Endpoint (Delete Scan)
-@app.delete("/api/v1/scans/{scan_id}", tags=["Scans"])
+@app.delete(
+    "/api/v1/scans/{scan_id}",
+    dependencies=[Depends(verify_api_key)],
+    tags=["Scans"]
+)
 def delete_scan(scan_id: str):
     """Deletes a scan and frees all associated disk space."""
     scan_dir = get_scan_dir(scan_id)
@@ -640,3 +814,4 @@ def delete_scan(scan_id: str):
         del SCAN_REGISTRY[scan_id]
 
     return {"status": "success", "message": f"Scan '{scan_id}' deleted successfully."}
+
