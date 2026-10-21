@@ -27,7 +27,7 @@ This module is completely decoupled from heavy databases (PostgreSQL, Valkey/Red
 ┌───────────────────────────────┐
 │  Frontend (React / Next.js)   │
 └───────────────┬───────────────┘
-                │ HTTP REST API (port 8000)
+                │ HTTP REST API (port 3755)
                 ▼
 ┌────────────────────────────────────────────────────────┐
 │               Prowler IASM Microservice                │
@@ -74,7 +74,7 @@ This module is completely decoupled from heavy databases (PostgreSQL, Valkey/Red
    docker compose up -d
    ```
 
-* **Swagger API Documentation:** [http://localhost:8000/docs](http://localhost:8000/docs)
+* **Swagger API Documentation:** [http://localhost:3755/docs](http://localhost:3755/docs)
 * **Interactive Test UI:** [http://localhost:8501](http://localhost:8501)
 
 ---
@@ -90,7 +90,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 # Start the REST API
-uvicorn src.api.api:app --host 0.0.0.0 --port 8000 --reload
+uvicorn src.api.api:app --host 0.0.0.0 --port 3755 --reload
 ```
 
 ---
@@ -130,7 +130,7 @@ print("Downloadable Bundle:", scan["files"]["zip_bundle"])
 Verifies AWS credentials or AssumeRole configuration using AWS STS without running any scan.
 
 ```bash
-curl -X POST "http://localhost:8000/api/v1/scans/test-connection" \
+curl -X POST "http://localhost:3755/api/v1/scans/test-connection" \
   -H "Content-Type: application/json" \
   -d '{
     "role_arn": "arn:aws:iam::123456789012:role/ProwlerIASMScanRole",
@@ -156,7 +156,7 @@ curl -X POST "http://localhost:8000/api/v1/scans/test-connection" \
 Enqueues an asynchronous scan. Returns immediately with a `scan_id`.
 
 ```bash
-curl -X POST "http://localhost:8000/api/v1/scans/run" \
+curl -X POST "http://localhost:3755/api/v1/scans/run" \
   -H "Content-Type: application/json" \
   -d '{
     "role_arn": "arn:aws:iam::123456789012:role/ProwlerIASMScanRole",
@@ -182,7 +182,7 @@ curl -X POST "http://localhost:8000/api/v1/scans/run" \
 Polls current execution status (`queued` -> `running` -> `completed` / `failed`).
 
 ```bash
-curl "http://localhost:8000/api/v1/scans/scan_4a8b9c1d2e3f/status"
+curl "http://localhost:3755/api/v1/scans/scan_4a8b9c1d2e3f/status"
 ```
 
 **Response:**
@@ -205,7 +205,7 @@ curl "http://localhost:8000/api/v1/scans/scan_4a8b9c1d2e3f/status"
 Fetches aggregated metrics for dashboard cards and charts.
 
 ```bash
-curl "http://localhost:8000/api/v1/scans/scan_4a8b9c1d2e3f/summary"
+curl "http://localhost:3755/api/v1/scans/scan_4a8b9c1d2e3f/summary"
 ```
 
 **Response:**
@@ -236,7 +236,7 @@ curl "http://localhost:8000/api/v1/scans/scan_4a8b9c1d2e3f/summary"
 Fetches paginated findings for table components.
 
 ```bash
-curl "http://localhost:8000/api/v1/scans/scan_4a8b9c1d2e3f/findings?severity=critical&status=FAIL&limit=10"
+curl "http://localhost:3755/api/v1/scans/scan_4a8b9c1d2e3f/findings?severity=critical&status=FAIL&limit=10"
 ```
 
 ---
@@ -245,7 +245,7 @@ curl "http://localhost:8000/api/v1/scans/scan_4a8b9c1d2e3f/findings?severity=cri
 Direct download of the comprehensive scan bundle containing CSV, JSON, and HTML.
 
 ```bash
-curl -O -J "http://localhost:8000/api/v1/scans/scan_4a8b9c1d2e3f/download-zip"
+curl -O -J "http://localhost:3755/api/v1/scans/scan_4a8b9c1d2e3f/download-zip"
 ```
 
 ---
@@ -254,7 +254,7 @@ curl -O -J "http://localhost:8000/api/v1/scans/scan_4a8b9c1d2e3f/download-zip"
 Terminates an actively running or queued scan process immediately.
 
 ```bash
-curl -X POST "http://localhost:8000/api/v1/scans/scan_4a8b9c1d2e3f/cancel"
+curl -X POST "http://localhost:3755/api/v1/scans/scan_4a8b9c1d2e3f/cancel"
 ```
 
 
@@ -272,7 +272,7 @@ const headers: Record<string, string> = {
 
 // 1. Instant Connection Test (< 500ms)
 async function testConnection(roleArn: string, externalId: string) {
-  const res = await fetch('http://localhost:8000/api/v1/scans/test-connection', {
+  const res = await fetch('http://localhost:3755/api/v1/scans/test-connection', {
     method: 'POST',
     headers,
     body: JSON.stringify({ role_arn: roleArn, external_id: externalId })
@@ -282,7 +282,7 @@ async function testConnection(roleArn: string, externalId: string) {
 
 // 2. Trigger Scan
 async function triggerScan(roleArn: string) {
-  const res = await fetch('http://localhost:8000/api/v1/scans/run', {
+  const res = await fetch('http://localhost:3755/api/v1/scans/run', {
     method: 'POST',
     headers,
     body: JSON.stringify({ role_arn: roleArn, regions: ['us-east-1'] })
@@ -293,13 +293,13 @@ async function triggerScan(roleArn: string) {
 
 // 3. Poll Scan Status
 async function pollStatus(scanId: string) {
-  const res = await fetch(`http://localhost:8000/api/v1/scans/${scanId}/status`, { headers });
+  const res = await fetch(`http://localhost:3755/api/v1/scans/${scanId}/status`, { headers });
   return await res.json();
 }
 
 // 4. Load Dashboard Summary
 async function loadSummary(scanId: string) {
-  const res = await fetch(`http://localhost:8000/api/v1/scans/${scanId}/summary`, { headers });
+  const res = await fetch(`http://localhost:3755/api/v1/scans/${scanId}/summary`, { headers });
   return await res.json();
 }
 ```

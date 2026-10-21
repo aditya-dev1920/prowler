@@ -11,9 +11,7 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 
-# ------------------------------------------------------------------------------
 # 1. Page Configuration & Custom Theme
-# ------------------------------------------------------------------------------
 st.set_page_config(
     page_title="Nopal IASM - Cloud Security Posture Management",
     page_icon="🛡️",
@@ -21,7 +19,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-DEFAULT_API_URL = os.getenv("API_BASE_URL", "http://localhost:8000").rstrip("/")
+DEFAULT_API_URL = os.getenv("API_BASE_URL", "http://localhost:3755").rstrip("/")
 DEFAULT_API_KEY = os.getenv("API_KEY", "").strip()
 
 # ------------------------------------------------------------------------------
@@ -373,98 +371,88 @@ if "api_key" not in st.session_state:
 # ------------------------------------------------------------------------------
 with st.sidebar:
     st.markdown("### ⚙️ Scan Configuration")
-    
-    # Demo Mode Switch
+
+    current_api_url = st.session_state["api_endpoint"]
+    current_api_key = st.session_state.get("api_key", "")
+
+    api_key_input = st.text_input(
+        "API Key (Optional)",
+        value=st.session_state["api_key"],
+        type="password",
+        help="Configured X-API-Key for secure enterprise API access."
+    ).strip()
+    st.session_state["api_key"] = api_key_input
+    current_api_key = api_key_input
+
+    st.markdown("#### 1. AWS Authentication")
+    auth_mode = st.radio(
+        "Authentication Method",
+        ["IAM Role Assume (Recommended)", "Direct Access Keys"],
+        label_visibility="collapsed"
+    )
+
+    role_arn = ""
+    external_id = ""
+    access_key = ""
+    secret_key = ""
+    session_token = ""
+
+    if auth_mode == "IAM Role Assume (Recommended)":
+        role_arn = st.text_input("Role ARN", placeholder="arn:aws:iam::123456789012:role/ProwlerIASMScanRole")
+        external_id = st.text_input("External ID (Optional)", placeholder="enterprise-client-id")
+    else:
+        access_key = st.text_input("AWS Access Key ID", type="password")
+        secret_key = st.text_input("AWS Secret Access Key", type="password")
+        session_token = st.text_input("AWS Session Token (Optional)", type="password")
+
+    st.markdown("#### 2. Scan Scope")
+    selected_regions = st.multiselect(
+        "Target Regions",
+        ["us-east-1", "us-east-2", "us-west-1", "us-west-2", "eu-west-1", "eu-central-1", "ap-south-1", "ap-southeast-1"],
+        default=["us-east-1", "ap-south-1"]
+    )
+
+    # Connection Test Action
+    st.markdown("<div style='height: 6px;'></div>", unsafe_allow_html=True)
+    if st.button("🔌 Verify STS Connection (< 500ms)", use_container_width=True):
+        test_payload = {
+            "role_arn": role_arn or None,
+            "external_id": external_id or None,
+            "access_key": access_key or None,
+            "secret_key": secret_key or None,
+            "session_token": session_token or None,
+            "region": selected_regions[0] if selected_regions else "us-east-1"
+        }
+        with st.spinner("Executing AWS STS GetCallerIdentity..."):
+            try:
+                res = requests.post(
+                    f"{current_api_url}/api/v1/scans/test-connection",
+                    json=test_payload,
+                    headers=get_auth_headers(current_api_key),
+                    timeout=10
+                )
+                if res.status_code == 200:
+                    data = res.json()
+                    if data.get("status") in ("success", "connected"):
+                        st.success(f"✅ Verified! Account: `{data.get('account')}`")
+                        st.caption(f"⚡ Latency: **{data.get('duration_ms')} ms** | Mode: `{data.get('mode', 'sts')}`")
+                    else:
+                        st.error(f"❌ Connection Failed: {data.get('message')}")
+                else:
+                    st.error(f"HTTP {res.status_code}: {res.text}")
+            except Exception as e:
+                st.error(f"Connection Error: {e}")
+
+    # Demo Mode Switch (Bottom of Sidebar)
+    st.markdown("---")
+    st.caption("🧪 **SANDBOX & TESTING**")
     demo_toggle = st.toggle(
-        "✨ Instant Demo Mode",
+        "Demo Mode",
         value=st.session_state["demo_mode"],
         help="Populate the dashboard with rich realistic AWS security data without running scans."
     )
     st.session_state["demo_mode"] = demo_toggle
-
-    if not st.session_state["demo_mode"]:
-        st.markdown("---")
-        endpoint_input = st.text_input("Microservice Endpoint", value=st.session_state["api_endpoint"]).rstrip("/")
-        st.session_state["api_endpoint"] = endpoint_input
-        current_api_url = endpoint_input
-
-        api_key_input = st.text_input(
-            "API Key (Optional)",
-            value=st.session_state["api_key"],
-            type="password",
-            help="Configured X-API-Key for secure enterprise API access."
-        ).strip()
-        st.session_state["api_key"] = api_key_input
-        current_api_key = api_key_input
-
-        st.markdown("#### 1. AWS Authentication")
-        auth_mode = st.radio(
-            "Authentication Method",
-            ["IAM Role Assume (Recommended)", "Direct Access Keys"],
-            label_visibility="collapsed"
-        )
-
-        role_arn = ""
-        external_id = ""
-        access_key = ""
-        secret_key = ""
-        session_token = ""
-
-        if auth_mode == "IAM Role Assume (Recommended)":
-            role_arn = st.text_input("Role ARN", placeholder="arn:aws:iam::123456789012:role/ProwlerIASMScanRole")
-            external_id = st.text_input("External ID (Optional)", placeholder="enterprise-client-id")
-        else:
-            access_key = st.text_input("AWS Access Key ID", type="password")
-            secret_key = st.text_input("AWS Secret Access Key", type="password")
-            session_token = st.text_input("AWS Session Token (Optional)", type="password")
-
-        st.markdown("#### 2. Scan Scope")
-        selected_regions = st.multiselect(
-            "Target Regions",
-            ["us-east-1", "us-east-2", "us-west-1", "us-west-2", "eu-west-1", "eu-central-1", "ap-south-1", "ap-southeast-1"],
-            default=["us-east-1", "ap-south-1"]
-        )
-
-        all_services = ["s3", "iam", "ec2", "rds", "vpc", "cloudtrail", "kms", "cloudwatch", "guardduty"]
-        selected_services = st.multiselect(
-            "Target Services (Default: All)",
-            all_services,
-            default=[]
-        )
-
-        # Connection Test Action
-        st.markdown("---")
-        if st.button("🔌 Verify STS Connection (< 500ms)", use_container_width=True):
-            test_payload = {
-                "role_arn": role_arn or None,
-                "external_id": external_id or None,
-                "access_key": access_key or None,
-                "secret_key": secret_key or None,
-                "session_token": session_token or None,
-                "region": selected_regions[0] if selected_regions else "us-east-1"
-            }
-            with st.spinner("Executing AWS STS GetCallerIdentity..."):
-                try:
-                    res = requests.post(
-                        f"{current_api_url}/api/v1/scans/test-connection",
-                        json=test_payload,
-                        headers=get_auth_headers(current_api_key),
-                        timeout=10
-                    )
-                    if res.status_code == 200:
-                        data = res.json()
-                        if data.get("status") in ("success", "connected"):
-                            st.success(f"✅ Verified! Account: `{data.get('account')}`")
-                            st.caption(f"⚡ Latency: **{data.get('duration_ms')} ms** | Mode: `{data.get('mode', 'sts')}`")
-                        else:
-                            st.error(f"❌ Connection Failed: {data.get('message')}")
-                    else:
-                        st.error(f"HTTP {res.status_code}: {res.text}")
-                except Exception as e:
-                    st.error(f"Connection Error: {e}")
-    else:
-        current_api_url = st.session_state["api_endpoint"]
-        current_api_key = st.session_state.get("api_key", "")
+    if demo_toggle:
         st.info("💡 **Demo Mode Active**: Displaying realistic enterprise cloud audit data.")
         st.markdown("**Target Cloud:** AWS Production Infrastructure\n**Account ID:** `849204128941`\n**Regions:** `us-east-1, ap-south-1`")
 
@@ -475,7 +463,7 @@ health_info = fetch_api_health(current_api_url, current_api_key)
 api_online = health_info["online"]
 
 status_html = (
-    f'<div class="status-badge status-online"><span class="pulse-dot"></span> API Engine Online ({current_api_url})</div>'
+    f'<div class="status-badge status-online"><span class="pulse-dot"></span></div>'
     if api_online else
     '<div class="status-badge status-offline"><span class="pulse-dot"></span> Backend Offline (Demo Ready)</div>'
 )
@@ -483,8 +471,8 @@ status_html = (
 st.markdown(f"""
 <div class="brand-header">
     <div class="brand-title">
-        🛡️ NOPAL IASM 
-        <span class="brand-badge">v1.0 Production</span>
+        🛡️ NOPAL CYBER 
+        <span class="brand-badge">CSPM</span>
     </div>
     <div>{status_html}</div>
 </div>
@@ -511,7 +499,6 @@ with col_launch:
                     "secret_key": secret_key or None,
                     "session_token": session_token or None,
                     "regions": selected_regions,
-                    "services": selected_services if selected_services else None,
                 }
                 try:
                     launch_res = requests.post(
@@ -1010,4 +997,4 @@ if summary_data:
         with st.expander("🔍 View Raw Audit Metadata (`summary.json`)"):
             st.json(summary_data)
 else:
-    st.info("👈 **Get Started:** Select your AWS Role ARN or Access Keys in the sidebar, or toggle **'✨ Instant Demo Mode'** to explore the dashboard immediately.")
+    st.info("👈 **Get Started:** Select your AWS Role ARN or Access Keys in the sidebar, or toggle **'Demo Mode'** to explore the dashboard immediately.")

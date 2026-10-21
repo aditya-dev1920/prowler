@@ -1,24 +1,25 @@
 services:
-  prowler-iasm:
+  # 1. FastAPI REST Microservice
+  iasm-api:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: prowler-iasm-service
+    container_name: prowler-iasm-api
     restart: unless-stopped
     ports:
-      - "8000:8000"  # FastAPI REST API & Swagger UI (/docs)
-      - "8501:8501"  # Optional Streamlit Test Dashboard
+      - "3755:3755"  # FastAPI REST API & Swagger UI (/docs)
     env_file:
       - path: .env
         required: false
     environment:
-      - API_PORT=8000
+      - API_PORT=3755
       - MAX_CONCURRENT_SCANS=2
       - SCAN_OUTPUT_DIR=/app/scan_results
       - CORS_ORIGINS=*
     volumes:
       # Persist scan reports, JSON data, and downloadable ZIP bundles on the host
       - ./scan_results:/app/scan_results
+    command: ["uvicorn", "src.api.api:app", "--host", "0.0.0.0", "--port", "3755"]
     deploy:
       resources:
         limits:
@@ -26,3 +27,25 @@ services:
         reservations:
           memory: 128M
 
+  # 2. Streamlit Interactive Dashboard
+  iasm-ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: prowler-iasm-ui
+    restart: unless-stopped
+    depends_on:
+      - iasm-api
+    ports:
+      - "8501:8501"  # Streamlit UI on http://localhost:8501
+    environment:
+      - API_BASE_URL=http://iasm-api:3755
+    volumes:
+      - ./scan_results:/app/scan_results
+    command: ["streamlit", "run", "src/streamlit/streamlit.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+        reservations:
+          memory: 128M

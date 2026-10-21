@@ -9,6 +9,7 @@ import signal
 import sys
 import time
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -16,7 +17,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Security, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
-from fastapi.security import APIKeyHeader
+from fastapi.security import APIKeyHeader, APIKeyQuery
 from pydantic import BaseModel, Field
 
 # Configuration & Logging
@@ -46,19 +47,24 @@ SCAN_REGISTRY: Dict[str, Dict[str, Any]] = {}
 # API Key Security Authentication
 API_KEY = os.getenv("API_KEY", "").strip()
 API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
+API_KEY_QUERY = APIKeyQuery(name="api_key", auto_error=False)
 
-async def verify_api_key(api_key: Optional[str] = Security(API_KEY_HEADER)) -> bool:
+async def verify_api_key(
+    header_key: Optional[str] = Security(API_KEY_HEADER),
+    query_key: Optional[str] = Security(API_KEY_QUERY)
+) -> bool:
     """
-    Validates API key from X-API-Key header.
+    Validates API key from X-API-Key header or api_key query parameter.
     If API_KEY is unset in the environment, allows requests (development/internal mode).
     If API_KEY is configured, enforces constant-time comparison.
     """
     if not API_KEY:
         return True
-    if not api_key or not secrets.compare_digest(api_key, API_KEY):
+    key = header_key or query_key
+    if not key or not secrets.compare_digest(key, API_KEY):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing X-API-Key authentication header."
+            detail="Invalid or missing X-API-Key authentication header or api_key query parameter."
         )
     return True
 
@@ -111,10 +117,10 @@ def resolve_script_command(args: List[str]) -> List[str]:
 # Security Helpers
 def sanitize_scan_id(scan_id: str) -> str:
     """Prevents directory traversal and shell injection via custom scan IDs."""
-    if not re.match(r"^[a-zA-Z0-9_\-]+$", scan_id):
+    if not re.match(r"^[a-zA-Z0-9_\-\.]+$", scan_id) or ".." in scan_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid scan_id format. Must contain only alphanumeric characters, underscores, or hyphens."
+            detail="Invalid scan_id format. Must contain only alphanumeric characters, underscores, hyphens, or dots."
         )
     return scan_id
 
@@ -129,13 +135,87 @@ def get_scan_dir(scan_id: str) -> Path:
         )
     return target
 
+# State Persistence & Disk Pruning
+def save_metadata(scan_id: str, data: Dict[str, Any]):
+    scan_dir = get_scan_dir(scan_id)
+    scan_dir.mkdir(parents=True, exist_ok=True)
+    meta_path = scan_dir / "metadata.json"
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+def prune_expired_scans():
+    """Removes scan directories older than SCAN_RETENTION_DAYS."""
+    if SCAN_RETENTION_DAYS <= 0 or not OUTPUT_DIR.exists():
+        return
+    now_utc = datetime.now(timezone.utc)
+    now_ts = time.time()
+    retention_seconds = SCAN_RETENTION_DAYS * 86400
+
+    for item in OUTPUT_DIR.iterdir():
+        if item.is_dir():
+            meta_path = item / "metadata.json"
+            should_prune = False
+            if meta_path.exists():
+                try:
+                    with open(meta_path, "r", encoding="utf-8") as f:
+                        meta = json.load(f)
+                    ts_str = meta.get("completed_at") or meta.get("created_at")
+                    if ts_str:
+                        comp_dt = datetime.fromisoformat(ts_str)
+                        if (now_utc - comp_dt).total_seconds() > retention_seconds:
+                            should_prune = True
+                except Exception:
+                    pass
+            else:
+                if (now_ts - item.stat().st_mtime) > retention_seconds:
+                    should_prune = True
+
+            if should_prune:
+                logger.info(f"Pruning expired scan directory: {item.name} (> {SCAN_RETENTION_DAYS} days old)")
+                shutil.rmtree(item, ignore_errors=True)
+                SCAN_REGISTRY.pop(item.name, None)
+
+def load_metadata_from_disk():
+    """Restores scan registry from disk and reconciles interrupted scans."""
+    if not OUTPUT_DIR.exists():
+        return
+    for item in OUTPUT_DIR.iterdir():
+        if item.is_dir():
+            meta_path = item / "metadata.json"
+            if meta_path.exists():
+                try:
+                    with open(meta_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+
+                        # Reconcile orphaned/interrupted scans if the server rebooted mid-scan
+                        if data.get("status") in ("running", "queued"):
+                            data["status"] = "failed"
+                            data["error_message"] = "Scan interrupted due to server reboot or container restart."
+                            data["completed_at"] = datetime.now(timezone.utc).isoformat()
+                            with open(meta_path, "w", encoding="utf-8") as fw:
+                                json.dump(data, fw, indent=2)
+
+                        SCAN_REGISTRY[item.name] = data
+                except Exception as e:
+                    logger.warning(f"Failed to load metadata for {item.name}: {e}")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("Initializing Prowler IASM Microservice...")
+    load_metadata_from_disk()
+    prune_expired_scans()
+    auth_mode = "API Key Enforced" if API_KEY else "Open Access (No API Key configured)"
+    logger.info(f"Loaded {len(SCAN_REGISTRY)} scans from disk. Max concurrent scans: {MAX_CONCURRENT_SCANS}. Auth: {auth_mode}")
+    yield
+
 # FastAPI App Initialization & Compliant CORS
 app = FastAPI(
     title="Prowler IASM Microservice",
     description="Production-grade REST API for AWS Attack Surface Management & Security Compliance",
     version="1.1.0",
     docs_url="/docs",
-    redoc_url="/redoc"
+    redoc_url="/redoc",
+    lifespan=lifespan
 )
 
 cors_origins_env = os.getenv("CORS_ORIGINS", "*").strip()
@@ -199,77 +279,6 @@ class ScanStatusResponse(BaseModel):
     has_summary: bool = False
     has_bundle: bool = False
 
-# State Persistence & Disk Pruning
-def save_metadata(scan_id: str, data: Dict[str, Any]):
-    scan_dir = get_scan_dir(scan_id)
-    scan_dir.mkdir(parents=True, exist_ok=True)
-    meta_path = scan_dir / "metadata.json"
-    with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-
-def prune_expired_scans():
-    """Removes scan directories older than SCAN_RETENTION_DAYS."""
-    if SCAN_RETENTION_DAYS <= 0 or not OUTPUT_DIR.exists():
-        return
-    now_utc = datetime.now(timezone.utc)
-    now_ts = time.time()
-    retention_seconds = SCAN_RETENTION_DAYS * 86400
-
-    for item in OUTPUT_DIR.iterdir():
-        if item.is_dir():
-            meta_path = item / "metadata.json"
-            should_prune = False
-            if meta_path.exists():
-                try:
-                    with open(meta_path, "r", encoding="utf-8") as f:
-                        meta = json.load(f)
-                    completed_at = meta.get("completed_at")
-                    if completed_at:
-                        comp_dt = datetime.fromisoformat(completed_at)
-                        if (now_utc - comp_dt).total_seconds() > retention_seconds:
-                            should_prune = True
-                except Exception:
-                    pass
-            else:
-                if (now_ts - item.stat().st_mtime) > retention_seconds:
-                    should_prune = True
-
-            if should_prune:
-                logger.info(f"Pruning expired scan directory: {item.name} (> {SCAN_RETENTION_DAYS} days old)")
-                shutil.rmtree(item, ignore_errors=True)
-                SCAN_REGISTRY.pop(item.name, None)
-
-def load_metadata_from_disk():
-    """Restores scan registry from disk and reconciles interrupted scans."""
-    if not OUTPUT_DIR.exists():
-        return
-    for item in OUTPUT_DIR.iterdir():
-        if item.is_dir():
-            meta_path = item / "metadata.json"
-            if meta_path.exists():
-                try:
-                    with open(meta_path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-
-                        # Reconcile orphaned/interrupted scans if the server rebooted mid-scan
-                        if data.get("status") in ("running", "queued"):
-                            data["status"] = "failed"
-                            data["error_message"] = "Scan interrupted due to server reboot or container restart."
-                            data["completed_at"] = datetime.now(timezone.utc).isoformat()
-                            with open(meta_path, "w", encoding="utf-8") as fw:
-                                json.dump(data, fw, indent=2)
-
-                        SCAN_REGISTRY[item.name] = data
-                except Exception as e:
-                    logger.warning(f"Failed to load metadata for {item.name}: {e}")
-
-@app.on_event("startup")
-def startup_event():
-    logger.info("Initializing Prowler IASM Microservice...")
-    load_metadata_from_disk()
-    prune_expired_scans()
-    auth_mode = "API Key Enforced" if API_KEY else "Open Access (No API Key configured)"
-    logger.info(f"Loaded {len(SCAN_REGISTRY)} scans from disk. Max concurrent scans: {MAX_CONCURRENT_SCANS}. Auth: {auth_mode}")
 
 # Background Scan Execution Task
 async def execute_prowler_scan(scan_id: str, req: ScanRequest):

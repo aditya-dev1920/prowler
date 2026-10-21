@@ -6,7 +6,7 @@ FROM python:3.11-slim-bookworm
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     DEBIAN_FRONTEND=noninteractive \
-    PORT=8000
+    PORT=3755
 
 # Install minimal OS dependencies required for scans, compression, and healthchecks
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -34,13 +34,12 @@ COPY . /app/
 RUN chmod +x /app/run_scan.sh && \
     mkdir -p /app/scan_results
 
-# Expose REST API (8000) and optional Streamlit UI (8501)
-EXPOSE 8000 8501
+# Expose REST API (3755) and optional Streamlit UI (8501)
+EXPOSE 3755 8501
 
 # Healthcheck to ensure microservice readiness
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD curl -f http://localhost:3755/health || exit 1
 
 # Default command launches the FastAPI microservice
-CMD ["uvicorn", "src.api.api:app", "--host", "0.0.0.0", "--port", "8000"]
-
+CMD ["uvicorn", "src.api.api:app", "--host", "0.0.0.0", "--port", "3755"]
