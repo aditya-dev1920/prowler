@@ -240,16 +240,21 @@ if [[ ! -f "$OCSF_FILE" && $PROWLER_EXIT_CODE -ne 0 ]]; then
     exit $PROWLER_EXIT_CODE
 fi
 
-# STEP 4: EXTRACT FINDINGS & ASSETS INVENTORY (JSON)
+# STEP 4: EXTRACT FINDINGS & ASSETS INVENTORY (JSON) & GENERATE PDF
 # (Uses environment variables for safety against quoting/injection)
 OCSF_FILE="$OCSF_FILE" \
 TARGET_DIR="$TARGET_DIR" \
 SCAN_ID="$SCAN_ID" \
 ACCOUNT_ID="$ACCOUNT_ID" \
 DURATION="$DURATION" \
+SCRIPT_DIR="$SCRIPT_DIR" \
 "${PYTHON_BIN[@]}" -c "
-import os, json
+import os, sys, json
 from pathlib import Path
+
+script_dir = Path(os.environ.get('SCRIPT_DIR', ''))
+if str(script_dir) not in sys.path:
+    sys.path.insert(0, str(script_dir))
 
 ocsf_path = Path(os.environ.get('OCSF_FILE', ''))
 target_dir = Path(os.environ.get('TARGET_DIR', ''))
@@ -267,6 +272,7 @@ severity_counts = {
     'low': {'fail': 0, 'pass': 0}
 }
 services_breakdown = {}
+compliance_tracker = {}
 
 if ocsf_path.exists():
     with open(ocsf_path, 'r', encoding='utf-8') as f:
@@ -292,11 +298,33 @@ if ocsf_path.exists():
             res_service = res_type.split('::')[-1].lower() if '::' in res_type else 'aws'
             res_region = res.get('region', 'global')
             status_ext = record.get('status_detail', record.get('message', ''))
+            res_labels = res.get('labels', []) or []
 
-            # 1. Finding Item (includes both service and service_name + status_extended for UI compatibility)
+            unmapped = record.get('unmapped', {})
+            remediation_obj = record.get('remediation', {})
+            remediation_code = remediation_obj.get('code', {}) if isinstance(remediation_obj, dict) else {}
+            cli_code = remediation_code.get('cli') or ''
+            risk_text = record.get('risk_details', '')
+            categories = unmapped.get('categories', []) or []
+            compliance = unmapped.get('compliance', {}) or {}
+            finding_uid = record.get('uid') or record.get('id') or ''
+            check_id = record.get('metadata', {}).get('product', {}).get('name', record.get('activity_name'))
+
+            # Extract references list
+            raw_refs = []
+            if isinstance(remediation_obj, dict):
+                r_refs = remediation_obj.get('references') or []
+                raw_refs.extend(r_refs if isinstance(r_refs, list) else [r_refs])
+            u_refs = unmapped.get('references') or unmapped.get('related_url') or []
+            raw_refs.extend(u_refs if isinstance(u_refs, list) else [u_refs])
+            all_refs = [str(r) for r in raw_refs if r]
+            dedup_refs = list(dict.fromkeys(all_refs))
+
+            # 1. Finding Item (Full Prowler finding metadata)
             finding = {
                 'id': record.get('id'),
-                'check_id': record.get('metadata', {}).get('product', {}).get('name', record.get('activity_name')),
+                'uid': finding_uid,
+                'check_id': check_id,
                 'check_title': record.get('message'),
                 'service': res_service,
                 'service_name': res_service,
@@ -307,12 +335,20 @@ if ocsf_path.exists():
                 'resource_name': res.get('name', res_arn),
                 'description': status_ext,
                 'status_extended': status_ext,
-                'remediation': record.get('remediation', {}).get('desc', ''),
-                'remediation_url': (record.get('remediation', {}).get('references') or [''])[0]
+                'risk': risk_text,
+                'categories': categories,
+                'compliance': compliance,
+                'remediation': remediation_obj.get('desc', '') if isinstance(remediation_obj, dict) else '',
+                'remediation_url': dedup_refs[0] if dedup_refs else '',
+                'remediation_cli': cli_code,
+                'references': dedup_refs,
+                'scan_id': scan_id,
+                'timestamp': record.get('time') or record.get('timestamp') or '',
+                'tags': res_labels
             }
             findings.append(finding)
 
-            # 2. Asset / Resource Item (Deduplicated)
+            # 2. Asset / Resource Item (Deduplicated with child check lists)
             if res_arn not in assets_map:
                 assets_map[res_arn] = {
                     'resource_arn': res_arn,
@@ -325,15 +361,28 @@ if ocsf_path.exists():
                     'high_failures': 0,
                     'medium_failures': 0,
                     'low_failures': 0,
-                    'total_checks_evaluated': 0
+                    'total_checks_evaluated': 0,
+                    'failed_checks': [],
+                    'passed_checks': [],
+                    'tags': res_labels
                 }
             assets_map[res_arn]['total_checks_evaluated'] += 1
+
+            check_entry = {
+                'check_id': check_id,
+                'check_title': record.get('message'),
+                'severity': severity,
+                'status': status
+            }
             if status == 'FAIL':
                 assets_map[res_arn]['status'] = 'vulnerable'
                 if severity in severity_counts:
                     assets_map[res_arn][f'{severity}_failures'] += 1
+                assets_map[res_arn]['failed_checks'].append(check_entry)
+            elif status == 'PASS':
+                assets_map[res_arn]['passed_checks'].append(check_entry)
 
-            # 3. Services breakdown (for frontend service comparison charts)
+            # 3. Services breakdown (for frontend charts)
             if res_service not in services_breakdown:
                 services_breakdown[res_service] = {'pass': 0, 'fail': 0, 'total': 0, 'PASS': 0, 'FAIL': 0}
             services_breakdown[res_service]['total'] += 1
@@ -341,7 +390,34 @@ if ocsf_path.exists():
                 services_breakdown[res_service][status.lower()] += 1
                 services_breakdown[res_service][status.upper()] += 1
 
+            # 4. Compliance framework tracking
+            if isinstance(compliance, dict):
+                for fw, reqs in compliance.items():
+                    if fw not in compliance_tracker:
+                        compliance_tracker[fw] = {'passed': 0, 'failed': 0, 'total': 0, 'requirements': set()}
+                    compliance_tracker[fw]['total'] += 1
+                    if status == 'PASS':
+                        compliance_tracker[fw]['passed'] += 1
+                    elif status == 'FAIL':
+                        compliance_tracker[fw]['failed'] += 1
+                    if isinstance(reqs, list):
+                        for r in reqs:
+                            compliance_tracker[fw]['requirements'].add(str(r))
+
 assets_list = list(assets_map.values())
+
+# Aggregate compliance overview metrics
+compliance_overview = {}
+for fw, stats in compliance_tracker.items():
+    tot = stats['total']
+    score = round((stats['passed'] / tot * 100), 1) if tot > 0 else 100.0
+    compliance_overview[fw] = {
+        'passed': stats['passed'],
+        'failed': stats['failed'],
+        'total': tot,
+        'score': score,
+        'requirements_count': len(stats['requirements'])
+    }
 
 total_evaluated = status_counts.get('PASS', 0) + status_counts.get('FAIL', 0)
 security_score = round((status_counts.get('PASS', 0) / total_evaluated * 100), 1) if total_evaluated > 0 else 100.0
@@ -364,6 +440,7 @@ summary = {
     'status_counts': status_counts,
     'severity_breakdown': severity_counts,
     'services_breakdown': services_breakdown,
+    'compliance_overview': compliance_overview,
     'total_assets_scanned': len(assets_list)
 }
 
@@ -375,6 +452,13 @@ with open(target_dir / 'assets.json', 'w', encoding='utf-8') as f:
 
 with open(target_dir / 'summary.json', 'w', encoding='utf-8') as f:
     json.dump(summary, f, indent=2)
+
+# Generate Executive Security Posture PDF Report
+try:
+    from src.reports.pdf_generator import generate_executive_pdf_report
+    generate_executive_pdf_report(summary, findings, assets_list, output_path=target_dir / 'report.pdf')
+except Exception as pdf_err:
+    pass
 "
 
 # STEP 5: CREATE ZIP ARCHIVE IF REQUESTED
@@ -384,8 +468,8 @@ if [[ "$FORMAT" == "zip" || "$FORMAT" == "all" ]]; then
     if command -v zip &> /dev/null; then
         (
             cd "$TARGET_DIR"
-            zip -q -r "$(basename "$ZIP_FILE")" findings.json assets.json summary.json report.csv report.html 2>/dev/null || \
-            zip -q -r "$(basename "$ZIP_FILE")" *.json *.csv *.html 2>/dev/null || true
+            zip -q -r "$(basename "$ZIP_FILE")" findings.json assets.json summary.json report.csv report.html report.pdf 2>/dev/null || \
+            zip -q -r "$(basename "$ZIP_FILE")" *.json *.csv *.html *.pdf 2>/dev/null || true
         )
     else
         TARGET_DIR="$TARGET_DIR" ZIP_FILE="$ZIP_FILE" "${PYTHON_BIN[@]}" -c "
@@ -393,14 +477,14 @@ import os, zipfile
 from pathlib import Path
 target = Path(os.environ['TARGET_DIR'])
 zip_path = Path(os.environ['ZIP_FILE'])
-files_to_pack = ['findings.json', 'assets.json', 'summary.json', 'report.csv', 'report.html']
+files_to_pack = ['findings.json', 'assets.json', 'summary.json', 'report.csv', 'report.html', 'report.pdf']
 with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
     for f in files_to_pack:
         fp = target / f
         if fp.exists():
             zf.write(fp, arcname=f)
     for p in target.glob('*'):
-        if p.suffix in ('.json', '.csv', '.html') and p.name not in files_to_pack and p.name != zip_path.name:
+        if p.suffix in ('.json', '.csv', '.html', '.pdf') and p.name not in files_to_pack and p.name != zip_path.name:
             zf.write(p, arcname=p.name)
 " 2>/dev/null || true
     fi

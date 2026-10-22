@@ -1,4 +1,5 @@
 import asyncio
+from collections import deque
 import json
 import logging
 import os
@@ -12,13 +13,16 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Security, status
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Response, Security, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import APIKeyHeader, APIKeyQuery
 from pydantic import BaseModel, Field
+
+from src.reports.pdf_generator import generate_executive_pdf_report, generate_compliance_pdf_report
+from src.reports.csv_generator import generate_compliance_csv
 
 # Configuration & Logging
 logging.basicConfig(
@@ -43,6 +47,18 @@ ACTIVE_PROCESSES: Dict[str, asyncio.subprocess.Process] = {}
 
 # In-memory registry for live tracking; populated from disk on startup
 SCAN_REGISTRY: Dict[str, Dict[str, Any]] = {}
+
+# In-memory artifact caches for ultra-fast pagination and debounced disk access
+FINDINGS_CACHE: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
+ASSETS_CACHE: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
+MAX_CACHE_ENTRIES = 25
+
+# Live execution log ring buffers for zero-disk-IO streaming (100 trailing lines per scan)
+SCAN_LOGS_BUFFER: Dict[str, deque] = {}
+MAX_LOG_BUFFER_SCANS = 50
+
+LAST_DISK_SYNC: float = 0.0
+DISK_SYNC_INTERVAL: float = 4.0  # Throttle full directory walks to at most once per 4s
 
 # API Key Security Authentication
 API_KEY = os.getenv("API_KEY", "").strip()
@@ -175,12 +191,16 @@ def prune_expired_scans():
                 shutil.rmtree(item, ignore_errors=True)
                 SCAN_REGISTRY.pop(item.name, None)
 
-def load_metadata_from_disk():
+def load_metadata_from_disk(reconcile_orphans: bool = False):
     """Restores scan registry from disk and reconciles interrupted scans."""
     if not OUTPUT_DIR.exists():
         return
     for item in OUTPUT_DIR.iterdir():
         if item.is_dir():
+            # Never overwrite active in-flight scans
+            if item.name in SCAN_REGISTRY and SCAN_REGISTRY[item.name].get("status") in ("running", "queued"):
+                continue
+
             meta_path = item / "metadata.json"
             if meta_path.exists():
                 try:
@@ -188,7 +208,7 @@ def load_metadata_from_disk():
                         data = json.load(f)
 
                         # Reconcile orphaned/interrupted scans if the server rebooted mid-scan
-                        if data.get("status") in ("running", "queued"):
+                        if reconcile_orphans and data.get("status") in ("running", "queued"):
                             data["status"] = "failed"
                             data["error_message"] = "Scan interrupted due to server reboot or container restart."
                             data["completed_at"] = datetime.now(timezone.utc).isoformat()
@@ -199,10 +219,74 @@ def load_metadata_from_disk():
                 except Exception as e:
                     logger.warning(f"Failed to load metadata for {item.name}: {e}")
 
+def maybe_sync_scans_from_disk():
+    """Throttles full directory walks to avoid file I/O bottlenecks under high polling load."""
+    global LAST_DISK_SYNC
+    now = time.time()
+    if now - LAST_DISK_SYNC >= DISK_SYNC_INTERVAL:
+        load_metadata_from_disk(reconcile_orphans=False)
+        LAST_DISK_SYNC = now
+
+def load_cached_findings(scan_id: str, findings_path: Path) -> List[Dict[str, Any]]:
+    """Loads and caches parsed findings in memory with mtime invalidation."""
+    mtime = findings_path.stat().st_mtime
+    if scan_id in FINDINGS_CACHE:
+        cached_mtime, cached_data = FINDINGS_CACHE[scan_id]
+        if cached_mtime == mtime:
+            return cached_data
+
+    with open(findings_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    if len(FINDINGS_CACHE) >= MAX_CACHE_ENTRIES:
+        FINDINGS_CACHE.pop(next(iter(FINDINGS_CACHE)), None)
+
+    FINDINGS_CACHE[scan_id] = (mtime, data)
+    return data
+
+def load_cached_assets(scan_id: str, assets_path: Path) -> List[Dict[str, Any]]:
+    """Loads and caches parsed assets in memory with mtime invalidation."""
+    mtime = assets_path.stat().st_mtime
+    if scan_id in ASSETS_CACHE:
+        cached_mtime, cached_data = ASSETS_CACHE[scan_id]
+        if cached_mtime == mtime:
+            return cached_data
+
+    with open(assets_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    if len(ASSETS_CACHE) >= MAX_CACHE_ENTRIES:
+        ASSETS_CACHE.pop(next(iter(ASSETS_CACHE)), None)
+
+    ASSETS_CACHE[scan_id] = (mtime, data)
+    return data
+
+def tail_file(file_path: Path, n: int = 50) -> List[str]:
+    """
+    Efficiently reads the last n lines of a log file without loading entire file into RAM.
+    Uses reverse seek for large files to guarantee O(1) memory and latency.
+    """
+    if not file_path.exists():
+        return []
+    try:
+        file_size = file_path.stat().st_size
+        if file_size == 0:
+            return []
+        if file_size < 65536:
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                return f.readlines()[-n:]
+        with open(file_path, "rb") as f:
+            f.seek(max(0, file_size - 65536))
+            lines = f.read().decode("utf-8", errors="replace").splitlines(keepends=True)
+            return lines[-n:]
+    except Exception as e:
+        logger.warning(f"Failed to tail file {file_path}: {e}")
+        return []
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Initializing Prowler IASM Microservice...")
-    load_metadata_from_disk()
+    load_metadata_from_disk(reconcile_orphans=True)
     prune_expired_scans()
     auth_mode = "API Key Enforced" if API_KEY else "Open Access (No API Key configured)"
     logger.info(f"Loaded {len(SCAN_REGISTRY)} scans from disk. Max concurrent scans: {MAX_CONCURRENT_SCANS}. Auth: {auth_mode}")
@@ -326,29 +410,58 @@ async def execute_prowler_scan(scan_id: str, req: ScanRequest):
 
         spawn_kwargs = get_subprocess_spawn_kwargs()
 
-        try:
-            with open(log_file, "w", encoding="utf-8") as lf:
-                process = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    env=sub_env,
-                    stdout=lf,
-                    stderr=asyncio.subprocess.STDOUT,
-                    **spawn_kwargs
-                )
-                ACTIVE_PROCESSES[scan_id] = process
+        # Initialize live ring buffer for real-time log streaming
+        buffer = deque(maxlen=100)
+        if len(SCAN_LOGS_BUFFER) >= MAX_LOG_BUFFER_SCANS:
+            SCAN_LOGS_BUFFER.pop(next(iter(SCAN_LOGS_BUFFER)), None)
+        SCAN_LOGS_BUFFER[scan_id] = buffer
 
-                # Enforce timeout guard to prevent hangs
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                env=sub_env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                **spawn_kwargs
+            )
+            ACTIVE_PROCESSES[scan_id] = process
+
+            async def stream_output():
                 try:
-                    return_code = await asyncio.wait_for(process.wait(), timeout=SCAN_TIMEOUT_SECONDS)
+                    with open(log_file, "w", encoding="utf-8") as lf:
+                        while True:
+                            line_bytes = await process.stdout.readline()
+                            if not line_bytes:
+                                break
+                            line = line_bytes.decode("utf-8", errors="replace")
+                            lf.write(line)
+                            lf.flush()
+                            buffer.append(line)
+                except Exception as e:
+                    logger.debug(f"Log streaming completed or ended for [{scan_id}]: {e}")
+
+            stream_task = asyncio.create_task(stream_output())
+
+            # Enforce timeout guard to prevent hangs
+            try:
+                return_code = await asyncio.wait_for(process.wait(), timeout=SCAN_TIMEOUT_SECONDS)
+                await stream_task
+            except asyncio.TimeoutError:
+                logger.error(f"Scan [{scan_id}] exceeded timeout limit of {SCAN_TIMEOUT_SECONDS}s. Terminating process tree.")
+                terminate_process_tree(process)
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=5.0)
                 except asyncio.TimeoutError:
-                    logger.error(f"Scan [{scan_id}] exceeded timeout limit of {SCAN_TIMEOUT_SECONDS}s. Terminating process tree.")
-                    terminate_process_tree(process)
+                    kill_process_tree(process)
+                return_code = -9
+                meta["error_message"] = f"Scan timed out after {SCAN_TIMEOUT_SECONDS} seconds."
+            finally:
+                if not stream_task.done():
+                    stream_task.cancel()
                     try:
-                        await asyncio.wait_for(process.wait(), timeout=5.0)
-                    except asyncio.TimeoutError:
-                        kill_process_tree(process)
-                    return_code = -9
-                    meta["error_message"] = f"Scan timed out after {SCAN_TIMEOUT_SECONDS} seconds."
+                        await stream_task
+                    except asyncio.CancelledError:
+                        pass
 
             ACTIVE_PROCESSES.pop(scan_id, None)
 
@@ -486,6 +599,7 @@ async def test_connection(req: TestConnectionRequest):
 # Run Scan Endpoint 
 @app.post(
     "/api/v1/scans/run",
+    status_code=status.HTTP_202_ACCEPTED,
     response_model=ScanLaunchResponse,
     dependencies=[Depends(verify_api_key)],
     tags=["Scans"]
@@ -592,6 +706,58 @@ def get_scan_status(scan_id: str):
         has_bundle=meta.get("has_bundle", False)
     )
 
+# Real-Time Execution Log Retrieval Endpoint
+@app.get(
+    "/api/v1/scans/{scan_id}/logs",
+    dependencies=[Depends(verify_api_key)],
+    tags=["Scans"]
+)
+def get_scan_logs(
+    scan_id: str,
+    tail: int = Query(50, ge=1, le=500, description="Number of trailing log lines to return")
+):
+    """
+    Returns real-time execution log lines and current scanning step.
+    Serves directly from in-memory ring buffer (O(1) in RAM) for running scans,
+    falling back to efficient reverse chunk seek on disk for completed scans.
+    """
+    sanitize_scan_id(scan_id)
+
+    lines: List[str] = []
+    if scan_id in SCAN_LOGS_BUFFER and SCAN_LOGS_BUFFER[scan_id]:
+        lines = list(SCAN_LOGS_BUFFER[scan_id])[-tail:]
+    else:
+        log_file = get_scan_dir(scan_id) / "execution.log"
+        lines = tail_file(log_file, n=tail)
+
+    current_service = None
+    current_check = None
+    for line in reversed(lines):
+        if not current_service:
+            svc_match = re.search(r"(?:Scanning\s+service|Scanning|service)[:\s]+([a-zA-Z0-9_\-]+)", line, re.IGNORECASE)
+            if svc_match:
+                candidate = svc_match.group(1).upper()
+                if candidate not in ("SERVICE", "ACCOUNT", "AWS"):
+                    current_service = candidate
+        if not current_check:
+            chk_match = re.search(r"(?:Executing check|Check)[:\s]+([a-zA-Z0-9_\-]+)", line, re.IGNORECASE)
+            if chk_match:
+                current_check = chk_match.group(1)
+        if current_service and current_check:
+            break
+
+    meta = SCAN_REGISTRY.get(scan_id, {})
+    status_str = meta.get("status", "unknown")
+
+    return {
+        "scan_id": scan_id,
+        "status": status_str,
+        "current_service": current_service,
+        "current_check": current_check,
+        "lines": lines,
+        "line_count": len(lines)
+    }
+
 # Scan Result Retrieval Endpoint (Artifacts)
 @app.get(
     "/api/v1/scans/{scan_id}/summary",
@@ -643,10 +809,12 @@ def get_scan_findings(
         )
 
     try:
-        with open(findings_path, "r", encoding="utf-8") as f:
-            findings: List[Dict[str, Any]] = json.load(f)
+        findings = load_cached_findings(scan_id, findings_path)
     except json.JSONDecodeError:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Findings report is being written. Retry.")
+    except Exception as e:
+        logger.error(f"Failed to load findings for {scan_id}: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to load findings.")
 
     # In-memory filtering supporting both 'service' and 'service_name'
     filtered = findings
@@ -708,10 +876,12 @@ def get_scan_assets(
         )
 
     try:
-        with open(assets_path, "r", encoding="utf-8") as f:
-            assets: List[Dict[str, Any]] = json.load(f)
+        assets = load_cached_assets(scan_id, assets_path)
     except json.JSONDecodeError:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Asset inventory is being written. Retry.")
+    except Exception as e:
+        logger.error(f"Failed to load assets for {scan_id}: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to load asset inventory.")
 
     filtered = assets
     if service_filter:
@@ -789,7 +959,131 @@ def view_csv_report(scan_id: str):
             detail=f"CSV report for scan '{scan_id}' not found."
         )
 
-    return FileResponse(path=str(csv_path), media_type="text/csv")
+    return FileResponse(
+        path=str(csv_path),
+        filename=f"prowler_findings_{scan_id}.csv",
+        media_type="text/csv"
+    )
+
+# Scan Result Retrieval Endpoint (View/Download Executive PDF Report)
+@app.get(
+    "/api/v1/scans/{scan_id}/report-pdf",
+    dependencies=[Depends(verify_api_key)],
+    tags=["Export & Reports"]
+)
+def view_pdf_report(scan_id: str):
+    """
+    Serves the Executive Cloud Security Posture Assessment Report in PDF format.
+    If not already rendered, generates the PDF report on-the-fly from audit artifacts.
+    """
+    scan_dir = get_scan_dir(scan_id)
+    pdf_path = scan_dir / "report.pdf"
+
+    if not pdf_path.exists():
+        summary_path = scan_dir / "summary.json"
+        findings_path = scan_dir / "findings.json"
+        assets_path = scan_dir / "assets.json"
+
+        if not summary_path.exists() or not findings_path.exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Audit artifacts for scan '{scan_id}' not found to generate PDF."
+            )
+
+        try:
+            with open(summary_path, "r", encoding="utf-8") as sf:
+                summary_data = json.load(sf)
+            findings_data = load_cached_findings(scan_id, findings_path)
+            assets_data = load_cached_assets(scan_id, assets_path) if assets_path.exists() else []
+
+            generate_executive_pdf_report(
+                summary_data=summary_data,
+                findings_data=findings_data,
+                assets_data=assets_data,
+                output_path=pdf_path
+            )
+        except Exception as e:
+            logger.error(f"Failed to generate PDF report for {scan_id}: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to generate PDF report: {e}"
+            )
+
+    return FileResponse(
+        path=str(pdf_path),
+        media_type="application/pdf",
+        filename=f"prowler_executive_report_{scan_id}.pdf"
+    )
+
+# Compliance Framework CSV Export
+@app.get(
+    "/api/v1/scans/{scan_id}/compliance/{framework_name}/csv",
+    dependencies=[Depends(verify_api_key)],
+    tags=["Export & Reports"]
+)
+def download_compliance_csv(scan_id: str, framework_name: str):
+    """Generates and downloads a framework-specific CSV report (e.g. CIS, PCI-DSS, NIST)."""
+    scan_dir = get_scan_dir(scan_id)
+    findings_path = scan_dir / "findings.json"
+    if not findings_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Findings for scan '{scan_id}' not found."
+        )
+
+    try:
+        findings_data = load_cached_findings(scan_id, findings_path)
+        csv_buf = generate_compliance_csv(findings_data, framework_name)
+        csv_bytes = csv_buf.getvalue().encode("utf-8")
+        safe_fw = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', framework_name)
+        return Response(
+            content=csv_bytes,
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="prowler_{scan_id}_{safe_fw}.csv"'}
+        )
+    except Exception as e:
+        logger.error(f"Failed to generate compliance CSV for {scan_id} / {framework_name}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate compliance CSV: {e}"
+        )
+
+# Compliance Framework PDF Export
+@app.get(
+    "/api/v1/scans/{scan_id}/compliance/{framework_name}/pdf",
+    dependencies=[Depends(verify_api_key)],
+    tags=["Export & Reports"]
+)
+def download_compliance_pdf(scan_id: str, framework_name: str):
+    """Generates and downloads a framework-specific PDF audit report (e.g. CIS, PCI-DSS, NIST)."""
+    scan_dir = get_scan_dir(scan_id)
+    summary_path = scan_dir / "summary.json"
+    findings_path = scan_dir / "findings.json"
+
+    if not summary_path.exists() or not findings_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Audit artifacts for scan '{scan_id}' not found."
+        )
+
+    try:
+        with open(summary_path, "r", encoding="utf-8") as sf:
+            summary_data = json.load(sf)
+        findings_data = load_cached_findings(scan_id, findings_path)
+
+        pdf_buf = generate_compliance_pdf_report(framework_name, summary_data, findings_data)
+        safe_fw = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', framework_name)
+        return Response(
+            content=pdf_buf.getvalue(),
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'inline; filename="prowler_{scan_id}_{safe_fw}_report.pdf"'}
+        )
+    except Exception as e:
+        logger.error(f"Failed to generate compliance PDF for {scan_id} / {framework_name}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate compliance PDF: {e}"
+        )
 
 # Scan Result Retrieval Endpoint (List Scans)
 @app.get(
@@ -799,7 +1093,7 @@ def view_csv_report(scan_id: str):
 )
 def list_scans():
     """Lists all past and currently executing scans."""
-    load_metadata_from_disk()
+    maybe_sync_scans_from_disk()
     sorted_scans = sorted(
         SCAN_REGISTRY.values(),
         key=lambda x: x.get("created_at", ""),
@@ -813,11 +1107,26 @@ def list_scans():
     dependencies=[Depends(verify_api_key)],
     tags=["Scans"]
 )
-def delete_scan(scan_id: str):
-    """Deletes a scan and frees all associated disk space."""
+async def delete_scan(scan_id: str):
+    """Deletes a scan, terminates any active execution, and frees all associated memory and disk space."""
+    sanitize_scan_id(scan_id)
+
+    proc = ACTIVE_PROCESSES.get(scan_id)
+    if proc:
+        terminate_process_tree(proc)
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=3.0)
+        except asyncio.TimeoutError:
+            kill_process_tree(proc)
+        ACTIVE_PROCESSES.pop(scan_id, None)
+
+    FINDINGS_CACHE.pop(scan_id, None)
+    ASSETS_CACHE.pop(scan_id, None)
+    SCAN_LOGS_BUFFER.pop(scan_id, None)
+
     scan_dir = get_scan_dir(scan_id)
     if scan_dir.exists():
-        shutil.rmtree(scan_dir)
+        shutil.rmtree(scan_dir, ignore_errors=True)
 
     if scan_id in SCAN_REGISTRY:
         del SCAN_REGISTRY[scan_id]

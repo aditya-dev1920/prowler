@@ -22,9 +22,7 @@ st.set_page_config(
 DEFAULT_API_URL = os.getenv("API_BASE_URL", "http://localhost:3755").rstrip("/")
 DEFAULT_API_KEY = os.getenv("API_KEY", "").strip()
 
-# ------------------------------------------------------------------------------
 # 2. Premium Enterprise CSS Styles & Smooth Animations
-# ------------------------------------------------------------------------------
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap');
@@ -155,6 +153,80 @@ st.markdown("""
     .badge-low { background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.4); padding: 2px 8px; border-radius: 6px; font-weight: 600; font-size: 0.75rem; }
     .badge-pass { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.4); padding: 2px 8px; border-radius: 6px; font-weight: 600; font-size: 0.75rem; }
 
+    /* Live Scan Monitor Card */
+    .scan-monitor-box {
+        background: linear-gradient(135deg, rgba(15, 23, 42, 0.95), rgba(30, 41, 59, 0.9));
+        border: 1px solid rgba(56, 189, 248, 0.3);
+        border-radius: 12px;
+        padding: 18px 22px;
+        margin-bottom: 20px;
+        box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+    }
+    .stage-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 0.78rem;
+        padding: 4px 10px;
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        color: #94a3b8;
+    }
+    .stage-pill-active {
+        background: rgba(56, 189, 248, 0.15);
+        border-color: rgba(56, 189, 248, 0.4);
+        color: #38bdf8;
+        font-weight: 600;
+    }
+    .stage-pill-done {
+        background: rgba(16, 185, 129, 0.15);
+        border-color: rgba(16, 185, 129, 0.3);
+        color: #10b981;
+    }
+
+    /* Category and Compliance Badges */
+    .cat-badge {
+        display: inline-block;
+        padding: 2px 8px;
+        margin: 2px;
+        border-radius: 4px;
+        background: rgba(148, 163, 184, 0.12);
+        color: #94a3b8;
+        border: 1px solid rgba(148, 163, 184, 0.25);
+        font-size: 0.72rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+    }
+    .compliance-pill {
+        display: inline-block;
+        padding: 3px 9px;
+        margin: 2px;
+        border-radius: 6px;
+        background: rgba(99, 102, 241, 0.15);
+        color: #a5b4fc;
+        border: 1px solid rgba(99, 102, 241, 0.3);
+        font-size: 0.75rem;
+        font-weight: 600;
+    }
+    .risk-alert-box {
+        background: rgba(239, 68, 68, 0.08);
+        border-left: 4px solid #ef4444;
+        padding: 10px 14px;
+        border-radius: 4px;
+        margin: 8px 0;
+        font-size: 0.88rem;
+        color: #fca5a5;
+    }
+    .info-grid-box {
+        background: rgba(15, 23, 42, 0.6);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 6px;
+        padding: 10px 14px;
+        margin-top: 8px;
+    }
+
     /* Action Buttons with Gradient Polish */
     .stButton>button {
         border-radius: 8px;
@@ -180,9 +252,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ------------------------------------------------------------------------------
 # 3. Realistic Demo Dataset (For Instant Sales/Leadership Demonstrations)
-# ------------------------------------------------------------------------------
 SAMPLE_DEMO_DATA = {
     "summary": {
         "scan_id": "demo_audit_prod_enterprise",
@@ -204,11 +274,19 @@ SAMPLE_DEMO_DATA = {
             "rds": {"PASS": 12, "FAIL": 4, "pass": 12, "fail": 4},
             "cloudtrail": {"PASS": 15, "FAIL": 3, "pass": 15, "fail": 3}
         },
+        "compliance_overview": {
+            "CIS-AWS-3.0": {"passed": 78, "failed": 14, "total": 92, "score": 84.8, "requirements_count": 42},
+            "PCI-DSS-4.0": {"passed": 45, "failed": 7, "total": 52, "score": 86.5, "requirements_count": 28},
+            "NIST-800-53": {"passed": 82, "failed": 18, "total": 100, "score": 82.0, "requirements_count": 55},
+            "SOC-2": {"passed": 64, "failed": 12, "total": 76, "score": 84.2, "requirements_count": 36},
+            "ISO-27001": {"passed": 51, "failed": 8, "total": 59, "score": 86.4, "requirements_count": 31}
+        },
         "total_assets_scanned": 48
     },
     "findings": [
         {
             "id": "f-01",
+            "uid": "prowler-aws-s3_bucket_public_access-849204128941-us-east-1-prod-customer-exports-storage",
             "check_id": "s3_bucket_public_access",
             "check_title": "S3 Bucket Public Access Block Not Configured",
             "service": "s3",
@@ -220,11 +298,27 @@ SAMPLE_DEMO_DATA = {
             "resource_name": "prod-customer-exports-storage",
             "description": "S3 bucket has public access block disabled, exposing sensitive customer records to the public internet.",
             "status_extended": "Bucket 'prod-customer-exports-storage' has PublicAccessBlock configuration missing.",
+            "risk": "Anonymous internet users can read, download, or delete confidential customer datasets stored in the S3 bucket, creating immediate data exfiltration and compliance liability.",
+            "categories": ["storage", "internet-exposed", "data-leakage"],
+            "compliance": {
+                "CIS-AWS-3.0": ["2.1.4.1", "2.1.4.2"],
+                "PCI-DSS-4.0": ["1.2.1", "1.3.1"],
+                "NIST-800-53": ["AC-3", "AC-4"],
+                "ISO-27001": ["A.8.20"]
+            },
             "remediation": "Enable Account-level and Bucket-level S3 Public Access Block immediately.",
-            "remediation_url": "https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-control-block-public-access.html"
+            "remediation_cli": "aws s3api put-public-access-block --bucket prod-customer-exports-storage --public-access-block-configuration \"BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true\"",
+            "remediation_url": "https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-control-block-public-access.html",
+            "references": [
+                "https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-control-block-public-access.html",
+                "https://docs.prowler.com/checks/aws/s3-public-access"
+            ],
+            "scan_id": "demo_audit_prod_enterprise",
+            "timestamp": "2026-10-21T18:30:00Z"
         },
         {
             "id": "f-02",
+            "uid": "prowler-aws-iam_root_access_key_check-849204128941-global-root",
             "check_id": "iam_root_access_key_check",
             "check_title": "Active AWS Root Account Access Keys Detected",
             "service": "iam",
@@ -235,12 +329,28 @@ SAMPLE_DEMO_DATA = {
             "resource_id": "arn:aws:iam::849204128941:root",
             "resource_name": "root",
             "description": "Root user account has active API access keys. If compromised, attackers obtain unrestricted privileges.",
-            "status_extended": "Root account has active access key ID 'AKIA...EXAMPLE'.",
+            "status_extended": "Root account has active access key ID 'AKIAIOSFODNN7EXAMPLE'.",
+            "risk": "Root account API credentials possess complete, unrestricted authority across all cloud services and billing without permission boundaries, bypassing MFA protection.",
+            "categories": ["iam", "secrets", "privilege-escalation"],
+            "compliance": {
+                "CIS-AWS-3.0": ["1.4"],
+                "PCI-DSS-4.0": ["7.2.1"],
+                "SOC-2": ["CC6.1"],
+                "NIST-800-53": ["IA-2"]
+            },
             "remediation": "Delete root access keys immediately and enforce IAM roles or SSO for administrative tasks.",
-            "remediation_url": "https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html#lock-away-credentials"
+            "remediation_cli": "aws iam delete-access-key --user-name root --access-key-id AKIAIOSFODNN7EXAMPLE",
+            "remediation_url": "https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html#lock-away-credentials",
+            "references": [
+                "https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html#lock-away-credentials",
+                "https://docs.prowler.com/checks/aws/iam-root-access-key"
+            ],
+            "scan_id": "demo_audit_prod_enterprise",
+            "timestamp": "2026-10-21T18:30:00Z"
         },
         {
             "id": "f-03",
+            "uid": "prowler-aws-ec2_securitygroup_allow_ingress-849204128941-us-east-1-sg-04a9bf912984efc",
             "check_id": "ec2_securitygroup_allow_ingress_from_internet_to_any_port",
             "check_title": "Security Group Allows Unrestricted Ingress (0.0.0.0/0)",
             "service": "ec2",
@@ -252,11 +362,26 @@ SAMPLE_DEMO_DATA = {
             "resource_name": "default-vpc-ingress-sg",
             "description": "Security group has inbound rules open to 0.0.0.0/0 on sensitive administrative port 22 (SSH).",
             "status_extended": "Security group allows 0.0.0.0/0 ingress on TCP:22 without restriction.",
+            "risk": "Exposing SSH or administrative ports to 0.0.0.0/0 permits continuous automated adversary brute-force attacks and exploitation of unpatched OpenSSH vulnerabilities.",
+            "categories": ["network", "internet-exposed", "trust-boundaries"],
+            "compliance": {
+                "CIS-AWS-3.0": ["5.2"],
+                "PCI-DSS-4.0": ["1.2.1", "2.2.4"],
+                "NIST-800-53": ["SC-7"]
+            },
             "remediation": "Restrict inbound traffic to trusted corporate CIDR ranges or utilize AWS Systems Manager Session Manager.",
-            "remediation_url": "https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-security-groups.html"
+            "remediation_cli": "aws ec2 revoke-security-group-ingress --group-id sg-04a9bf912984efc --protocol tcp --port 22 --cidr 0.0.0.0/0",
+            "remediation_url": "https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-security-groups.html",
+            "references": [
+                "https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-security-groups.html",
+                "https://docs.prowler.com/checks/aws/ec2-sg-ingress"
+            ],
+            "scan_id": "demo_audit_prod_enterprise",
+            "timestamp": "2026-10-21T18:30:00Z"
         },
         {
             "id": "f-04",
+            "uid": "prowler-aws-rds_instance_storage_encrypted-849204128941-ap-south-1-production-analytics-pg",
             "check_id": "rds_instance_storage_encrypted",
             "check_title": "RDS Database Instance Storage Encryption Disabled",
             "service": "rds",
@@ -268,11 +393,26 @@ SAMPLE_DEMO_DATA = {
             "resource_name": "production-analytics-pg",
             "description": "RDS PostgreSQL database storage is unencrypted at rest.",
             "status_extended": "DB instance storage is not encrypted using AWS KMS.",
+            "risk": "In the event of volume snapshot theft, accidental public sharing, or unauthorized underlying physical media access, database files are exposed in plaintext.",
+            "categories": ["database", "encryption", "forensics-ready"],
+            "compliance": {
+                "CIS-AWS-3.0": ["2.3.1"],
+                "PCI-DSS-4.0": ["3.4.1"],
+                "ISO-27001": ["A.8.24"]
+            },
             "remediation": "Create a KMS encrypted snapshot and restore the database to an encrypted instance.",
-            "remediation_url": "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Overview.Encryption.html"
+            "remediation_cli": "aws rds copy-db-snapshot --source-db-snapshot-identifier unencrypted-snap --target-db-snapshot-identifier encrypted-snap --kms-key-id default/aws/rds",
+            "remediation_url": "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Overview.Encryption.html",
+            "references": [
+                "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Overview.Encryption.html",
+                "https://docs.prowler.com/checks/aws/rds-encryption"
+            ],
+            "scan_id": "demo_audit_prod_enterprise",
+            "timestamp": "2026-10-21T18:30:00Z"
         },
         {
             "id": "f-05",
+            "uid": "prowler-aws-cloudtrail_multi_region_enabled-849204128941-us-east-1-main-audit-trail",
             "check_id": "cloudtrail_multi_region_enabled",
             "check_title": "CloudTrail Multi-Region Audit Logging Disabled",
             "service": "cloudtrail",
@@ -284,11 +424,25 @@ SAMPLE_DEMO_DATA = {
             "resource_name": "main-audit-trail",
             "description": "CloudTrail trail is configured for single-region only, blinding security audits to unauthorized activity in other regions.",
             "status_extended": "Trail 'main-audit-trail' is single region (isMultiRegionTrail=false).",
+            "risk": "Adversaries can launch malicious EC2 instances, pivot roles, and exfiltrate data in auxiliary unmonitored AWS regions without forensic audit trail creation.",
+            "categories": ["logging", "monitoring", "threat-detection"],
+            "compliance": {
+                "CIS-AWS-3.0": ["3.1"],
+                "NIST-800-53": ["AU-2", "AU-3"],
+                "SOC-2": ["CC7.2"]
+            },
             "remediation": "Configure CloudTrail with `--is-multi-region-trail` to capture global API activities.",
-            "remediation_url": "https://docs.aws.amazon.com/awscloudtrail/latest/userguide/receive-cloudtrail-log-files-from-multiple-regions.html"
+            "remediation_cli": "aws cloudtrail update-trail --name main-audit-trail --is-multi-region-trail",
+            "remediation_url": "https://docs.aws.amazon.com/awscloudtrail/latest/userguide/receive-cloudtrail-log-files-from-multiple-regions.html",
+            "references": [
+                "https://docs.aws.amazon.com/awscloudtrail/latest/userguide/receive-cloudtrail-log-files-from-multiple-regions.html"
+            ],
+            "scan_id": "demo_audit_prod_enterprise",
+            "timestamp": "2026-10-21T18:30:00Z"
         },
         {
             "id": "f-06",
+            "uid": "prowler-aws-kms_cmk_rotation_enabled-849204128941-us-east-1-prod-encryption-cmk",
             "check_id": "kms_cmk_rotation_enabled",
             "check_title": "KMS Customer Managed Key Rotation Enabled",
             "service": "kms",
@@ -300,22 +454,106 @@ SAMPLE_DEMO_DATA = {
             "resource_name": "prod-encryption-cmk",
             "description": "Automatic annual key rotation is enabled for Customer Managed KMS Key.",
             "status_extended": "Key rotation is active.",
+            "risk": "Controlled - Automatic cryptographic key rotation limits the lifetime of compromised key material.",
+            "categories": ["encryption", "governance"],
+            "compliance": {
+                "CIS-AWS-3.0": ["2.8"],
+                "PCI-DSS-4.0": ["3.6.4"]
+            },
             "remediation": "N/A - Key is compliant.",
-            "remediation_url": ""
+            "remediation_cli": "aws kms enable-key-rotation --key-id 1234abcd-12ab-34cd-56ef-1234567890ab",
+            "remediation_url": "",
+            "references": [
+                "https://docs.aws.amazon.com/kms/latest/developerguide/rotate-keys.html"
+            ],
+            "scan_id": "demo_audit_prod_enterprise",
+            "timestamp": "2026-10-21T18:30:00Z"
         }
     ],
     "assets": [
-        {"resource_arn": "arn:aws:s3:::prod-customer-exports-storage", "resource_name": "prod-customer-exports-storage", "service": "s3", "region": "us-east-1", "status": "vulnerable", "critical_failures": 1, "high_failures": 0, "total_checks_evaluated": 12},
-        {"resource_arn": "arn:aws:iam::849204128941:root", "resource_name": "root-account", "service": "iam", "region": "global", "status": "vulnerable", "critical_failures": 1, "high_failures": 0, "total_checks_evaluated": 16},
-        {"resource_arn": "sg-04a9bf912984efc", "resource_name": "default-vpc-ingress-sg", "service": "ec2", "region": "us-east-1", "status": "vulnerable", "critical_failures": 1, "high_failures": 1, "total_checks_evaluated": 8},
-        {"resource_arn": "arn:aws:rds:ap-south-1:849204128941:db:production-analytics-pg", "resource_name": "production-analytics-pg", "service": "rds", "region": "ap-south-1", "status": "vulnerable", "critical_failures": 0, "high_failures": 1, "total_checks_evaluated": 10},
-        {"resource_arn": "arn:aws:kms:us-east-1:849204128941:key/1234abcd", "resource_name": "prod-encryption-cmk", "service": "kms", "region": "us-east-1", "status": "secure", "critical_failures": 0, "high_failures": 0, "total_checks_evaluated": 9}
+        {
+            "resource_arn": "arn:aws:s3:::prod-customer-exports-storage",
+            "resource_name": "prod-customer-exports-storage",
+            "service": "s3",
+            "region": "us-east-1",
+            "status": "vulnerable",
+            "critical_failures": 1,
+            "high_failures": 0,
+            "total_checks_evaluated": 12,
+            "failed_checks": [
+                {"check_id": "s3_bucket_public_access", "check_title": "S3 Bucket Public Access Block Not Configured", "severity": "critical"}
+            ],
+            "passed_checks": [
+                {"check_id": "s3_bucket_default_encryption", "check_title": "S3 Bucket Default Encryption Enabled", "severity": "medium"},
+                {"check_id": "s3_bucket_versioning_enabled", "check_title": "S3 Bucket Object Versioning Active", "severity": "low"}
+            ]
+        },
+        {
+            "resource_arn": "arn:aws:iam::849204128941:root",
+            "resource_name": "root-account",
+            "service": "iam",
+            "region": "global",
+            "status": "vulnerable",
+            "critical_failures": 1,
+            "high_failures": 0,
+            "total_checks_evaluated": 16,
+            "failed_checks": [
+                {"check_id": "iam_root_access_key_check", "check_title": "Active AWS Root Account Access Keys Detected", "severity": "critical"}
+            ],
+            "passed_checks": [
+                {"check_id": "iam_root_mfa_enabled", "check_title": "Hardware/Virtual MFA Configured for Root Account", "severity": "critical"}
+            ]
+        },
+        {
+            "resource_arn": "sg-04a9bf912984efc",
+            "resource_name": "default-vpc-ingress-sg",
+            "service": "ec2",
+            "region": "us-east-1",
+            "status": "vulnerable",
+            "critical_failures": 1,
+            "high_failures": 1,
+            "total_checks_evaluated": 8,
+            "failed_checks": [
+                {"check_id": "ec2_securitygroup_allow_ingress_from_internet_to_any_port", "check_title": "Security Group Allows Unrestricted Ingress (0.0.0.0/0)", "severity": "critical"}
+            ],
+            "passed_checks": [
+                {"check_id": "ec2_securitygroup_default_restrict_traffic", "check_title": "Default Security Group Ingress Blocked", "severity": "high"}
+            ]
+        },
+        {
+            "resource_arn": "arn:aws:rds:ap-south-1:849204128941:db:production-analytics-pg",
+            "resource_name": "production-analytics-pg",
+            "service": "rds",
+            "region": "ap-south-1",
+            "status": "vulnerable",
+            "critical_failures": 0,
+            "high_failures": 1,
+            "total_checks_evaluated": 10,
+            "failed_checks": [
+                {"check_id": "rds_instance_storage_encrypted", "check_title": "RDS Database Instance Storage Encryption Disabled", "severity": "high"}
+            ],
+            "passed_checks": [
+                {"check_id": "rds_instance_multi_az", "check_title": "Multi-AZ Deployment Configured for High Availability", "severity": "medium"}
+            ]
+        },
+        {
+            "resource_arn": "arn:aws:kms:us-east-1:849204128941:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+            "resource_name": "prod-encryption-cmk",
+            "service": "kms",
+            "region": "us-east-1",
+            "status": "secure",
+            "critical_failures": 0,
+            "high_failures": 0,
+            "total_checks_evaluated": 9,
+            "failed_checks": [],
+            "passed_checks": [
+                {"check_id": "kms_cmk_rotation_enabled", "check_title": "KMS Customer Managed Key Rotation Enabled", "severity": "medium"}
+            ]
+        }
     ]
 }
 
-# ------------------------------------------------------------------------------
 # 4. High-Performance Caching Helpers (Zero Lag on UI Interactions)
-# ------------------------------------------------------------------------------
 def get_auth_headers(api_key: Optional[str] = None) -> Dict[str, str]:
     """Builds authentication headers with X-API-Key if key is provided."""
     key = api_key if api_key is not None else st.session_state.get("api_key", "")
@@ -366,9 +604,7 @@ if "api_endpoint" not in st.session_state:
 if "api_key" not in st.session_state:
     st.session_state["api_key"] = DEFAULT_API_KEY
 
-# ------------------------------------------------------------------------------
 # 5. Sidebar Controls & Credentials Configuration
-# ------------------------------------------------------------------------------
 with st.sidebar:
     st.markdown("### ⚙️ Scan Configuration")
 
@@ -456,9 +692,7 @@ with st.sidebar:
         st.info("💡 **Demo Mode Active**: Displaying realistic enterprise cloud audit data.")
         st.markdown("**Target Cloud:** AWS Production Infrastructure\n**Account ID:** `849204128941`\n**Regions:** `us-east-1, ap-south-1`")
 
-# ------------------------------------------------------------------------------
 # 6. Top Brand Header Bar
-# ------------------------------------------------------------------------------
 health_info = fetch_api_health(current_api_url, current_api_key)
 api_online = health_info["online"]
 
@@ -478,10 +712,8 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# ------------------------------------------------------------------------------
 # 7. Action Bar & Scan Dispatcher
-# ------------------------------------------------------------------------------
-col_launch, col_history, col_refresh = st.columns([2.5, 2, 0.5])
+col_launch, col_history, col_delete, col_refresh = st.columns([2.2, 1.8, 0.5, 0.5])
 
 with col_launch:
     if not st.session_state["demo_mode"]:
@@ -507,7 +739,7 @@ with col_launch:
                         headers=get_auth_headers(current_api_key),
                         timeout=10
                     )
-                    if launch_res.status_code == 200:
+                    if launch_res.status_code in (200, 202):
                         scan_id = launch_res.json()["scan_id"]
                         st.session_state["active_scan_id"] = scan_id
                         st.session_state["is_scanning"] = True
@@ -543,81 +775,184 @@ with col_history:
     else:
         st.selectbox("Historical Audit Runs", ["demo_audit_prod_enterprise (Active Demo)"], index=0, label_visibility="collapsed")
 
+with col_delete:
+    if not st.session_state["demo_mode"] and st.session_state.get("active_scan_id"):
+        cur_id = st.session_state["active_scan_id"]
+        if st.button("🗑️", help=f"Permanently delete scan '{cur_id}' and free disk space"):
+            try:
+                del_res = requests.delete(
+                    f"{current_api_url}/api/v1/scans/{cur_id}",
+                    headers=get_auth_headers(current_api_key),
+                    timeout=5
+                )
+                if del_res.status_code == 200:
+                    st.toast(f"Scan '{cur_id}' deleted successfully.", icon="🗑️")
+                    st.cache_data.clear()
+                    st.session_state["active_scan_id"] = None
+                    time.sleep(0.5)
+                    st.rerun()
+                else:
+                    st.error(f"Delete failed: {del_res.text}")
+            except Exception as e:
+                st.error(f"Delete error: {e}")
+
 with col_refresh:
     if st.button("🔄", help="Clear Cache & Refresh Dashboard"):
         st.cache_data.clear()
         st.rerun()
 
-# ------------------------------------------------------------------------------
-# 8. Live Scan Progress & Polling Indicator
-# ------------------------------------------------------------------------------
+# 8. Live Scan Progress & Polling Indicator (Real-Time Terminal & Stage Monitor)
 if st.session_state.get("is_scanning") and st.session_state.get("active_scan_id"):
     scan_id = st.session_state["active_scan_id"]
-    progress_bar = st.progress(0, text="Initializing Prowler security engine...")
-    status_text = st.empty()
-    cancel_btn_col, _ = st.columns([1, 4])
-    
-    with cancel_btn_col:
-        if st.button("⏹️ Cancel Active Scan", type="secondary", use_container_width=True):
-            try:
-                requests.post(
-                    f"{current_api_url}/api/v1/scans/{scan_id}/cancel",
-                    headers=get_auth_headers(current_api_key),
-                    timeout=5
-                )
-            except Exception:
-                pass
-            st.session_state["is_scanning"] = False
-            st.warning("Scan cancellation requested.")
-            st.rerun()
+
+    monitor_placeholder = st.empty()
+    terminal_expander = st.expander("🖥️ Live Execution Terminal (Streaming from Prowler Engine)", expanded=True)
+    with terminal_expander:
+        terminal_placeholder = st.empty()
 
     start_time = time.time()
-    steps = [
-        (15, "Step 1/4: Authenticating STS credentials & verifying role assumption..."),
-        (40, "Step 2/4: Discovering Cloud Asset topology across selected AWS regions..."),
-        (75, "Step 3/4: Evaluating CIS benchmarks, IAM permissions & CIS/Attack-paths..."),
-        (90, "Step 4/4: Compiling OCSF reports, asset inventories & ZIP bundles...")
+    step_definitions = [
+        (1, "STS & Auth", 15),
+        (2, "Asset Discovery", 35),
+        (3, "Security Checks", 70),
+        (4, "Reports & Bundle", 90),
     ]
 
-    step_idx = 0
     while True:
-        time.sleep(2.5)
         elapsed = int(time.time() - start_time)
+        mins, secs = divmod(elapsed, 60)
+        timer_str = f"{mins:02d}:{secs:02d}"
+
+        curr_status = "running"
+        current_service = None
+        current_check = None
+        error_msg = ""
+        log_lines: List[str] = []
+
+        # 1. Fetch live status & logs from microservice
         try:
             st_res = requests.get(
                 f"{current_api_url}/api/v1/scans/{scan_id}/status",
                 headers=get_auth_headers(current_api_key),
-                timeout=5
+                timeout=4
             )
             if st_res.status_code == 200:
                 s_data = st_res.json()
-                curr_status = s_data.get("status")
+                curr_status = s_data.get("status", "running")
+                error_msg = s_data.get("error_message") or ""
+            else:
+                curr_status = "error"
+                error_msg = f"HTTP {st_res.status_code}"
 
-                if step_idx < len(steps):
-                    progress_bar.progress(steps[step_idx][0], text=steps[step_idx][1])
-                    if elapsed > (step_idx + 1) * 8:
-                        step_idx += 1
-
-                status_text.caption(f"⏱️ Elapsed: **{elapsed}s** | Worker Status: **{curr_status.upper()}**")
-
-                if curr_status == "completed":
-                    progress_bar.progress(100, text="🎉 Security Assessment Finished!")
-                    st.session_state["is_scanning"] = False
-                    st.cache_data.clear()
-                    time.sleep(1)
-                    st.rerun()
-                elif curr_status in ("failed", "cancelled"):
-                    progress_bar.empty()
-                    status_text.error(f"❌ Scan {curr_status}: {s_data.get('error_message')}")
-                    st.session_state["is_scanning"] = False
-                    break
+            log_res = requests.get(
+                f"{current_api_url}/api/v1/scans/{scan_id}/logs?tail=35",
+                headers=get_auth_headers(current_api_key),
+                timeout=4
+            )
+            if log_res.status_code == 200:
+                l_data = log_res.json()
+                log_lines = l_data.get("lines", [])
+                current_service = l_data.get("current_service")
+                current_check = l_data.get("current_check")
         except Exception as e:
-            status_text.error(f"Polling error: {e}")
+            curr_status = "error"
+            error_msg = str(e)
+
+        # 2. Determine active stage (1 to 4)
+        if curr_status == "completed":
+            active_stage = 4
+            progress_pct = 100
+        elif current_service:
+            # Active security checks stage
+            active_stage = 3
+            progress_pct = min(88, 35 + min(50, elapsed * 2))
+        elif elapsed > 10:
+            active_stage = 2
+            progress_pct = min(35, 15 + elapsed)
+        else:
+            active_stage = 1
+            progress_pct = min(15, max(5, elapsed * 2))
+
+        # 3. Render stage pills HTML
+        stage_pills_html = []
+        for stage_num, stage_label, _ in step_definitions:
+            if curr_status == "completed" or stage_num < active_stage:
+                pill_cls = "stage-pill stage-pill-done"
+                icon = "✓"
+            elif stage_num == active_stage:
+                pill_cls = "stage-pill stage-pill-active"
+                icon = "⏳"
+            else:
+                pill_cls = "stage-pill"
+                icon = "○"
+            stage_pills_html.append(f'<span class="{pill_cls}">{icon} {stage_label}</span>')
+        pills_markup = " ".join(stage_pills_html)
+
+        # 4. Render main monitor card
+        service_badge = f'<span style="background: rgba(56, 189, 248, 0.2); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.4); padding: 3px 8px; border-radius: 6px; font-weight: 600; font-size: 0.8rem; margin-left: 8px;">TARGET: {current_service}</span>' if current_service else ""
+        check_desc = f"Evaluating check: <code>{current_check}</code>" if current_check else "Discovering services and evaluating IAM/CIS compliance rules..."
+
+        with monitor_placeholder.container():
+            st.markdown(f"""
+            <div class="scan-monitor-box">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <span class="status-badge status-online">
+                            <span class="pulse-dot"></span> SCAN IN PROGRESS
+                        </span>
+                        <span style="font-size: 0.85rem; color: #94a3b8; font-weight: 500;">
+                            ID: <strong style="color: #f1f5f9;">{scan_id}</strong>
+                        </span>
+                        {service_badge}
+                    </div>
+                    <div style="font-size: 0.9rem; font-weight: 600; color: #38bdf8; font-family: monospace;">
+                        ⏱️ {timer_str}
+                    </div>
+                </div>
+                <div style="margin: 10px 0 14px 0;">
+                    {pills_markup}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            st.progress(progress_pct / 100.0, text=f"Step {active_stage}/4: {check_desc}")
+
+            cancel_col, _ = st.columns([1, 4])
+            with cancel_col:
+                if st.button("⏹️ Cancel Active Scan", type="secondary", use_container_width=True):
+                    try:
+                        requests.post(
+                            f"{current_api_url}/api/v1/scans/{scan_id}/cancel",
+                            headers=get_auth_headers(current_api_key),
+                            timeout=5
+                        )
+                    except Exception:
+                        pass
+                    st.session_state["is_scanning"] = False
+                    st.warning("Scan cancellation requested.")
+                    st.rerun()
+
+        # 5. Update terminal output
+        if log_lines:
+            terminal_placeholder.code("".join(log_lines), language="bash")
+        else:
+            terminal_placeholder.caption("Awaiting output stream from Prowler engine...")
+
+        # 6. Check for completion or failure
+        if curr_status == "completed":
+            st.session_state["is_scanning"] = False
+            st.cache_data.clear()
+            st.success("Security Assessment Finished successfully! Loading dashboard...")
+            time.sleep(1.0)
+            st.rerun()
+            break
+        elif curr_status in ("failed", "cancelled"):
+            monitor_placeholder.error(f"❌ Scan {curr_status.upper()}: {error_msg}")
+            st.session_state["is_scanning"] = False
             break
 
-# ------------------------------------------------------------------------------
+        time.sleep(1.5)
+
 # 9. Main Intelligence Dashboard (Tabs Interface)
-# ------------------------------------------------------------------------------
 active_id = st.session_state.get("active_scan_id")
 summary_data = None
 findings_data = []
@@ -634,16 +969,15 @@ if summary_data:
     st.markdown("---")
     
     # Dashboard Tabs
-    tab_overview, tab_findings, tab_assets, tab_reports = st.tabs([
+    tab_overview, tab_compliance, tab_findings, tab_assets, tab_reports = st.tabs([
         "📊 Executive Overview",
+        "📜 Compliance Posture",
         "🔍 Findings Explorer",
         "☁️ Cloud Asset Inventory",
         "📦 Reports & Bundles"
     ])
 
-    # --------------------------------------------------------------------------
     # TAB 1: EXECUTIVE OVERVIEW
-    # --------------------------------------------------------------------------
     with tab_overview:
         score = float(summary_data.get("security_score", 100.0))
         critical_count = summary_data.get("critical", 0)
@@ -818,9 +1152,102 @@ if summary_data:
             else:
                 st.info("No service failures reported.")
 
-    # --------------------------------------------------------------------------
-    # TAB 2: FINDINGS EXPLORER
-    # --------------------------------------------------------------------------
+        # Quick Compliance Benchmark Cards Snapshot
+        compliance_overview = summary_data.get("compliance_overview", {})
+        if compliance_overview:
+            st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
+            st.markdown("#### 📜 Compliance Posture Snapshot")
+            c_cols = st.columns(min(len(compliance_overview), 5))
+            for c_idx, (fw_name, fw_stats) in enumerate(list(compliance_overview.items())[:5]):
+                with c_cols[c_idx]:
+                    fw_score = fw_stats.get("score", 100.0)
+                    fw_pass = fw_stats.get("passed", 0)
+                    fw_fail = fw_stats.get("failed", 0)
+                    score_col = "#10b981" if fw_score >= 80 else ("#f59e0b" if fw_score >= 60 else "#ef4444")
+                    st.markdown(f"""
+                    <div class="metric-card" style="padding: 14px;">
+                        <div class="metric-title" style="font-size: 0.75rem;">{fw_name}</div>
+                        <div style="font-size: 1.5rem; font-weight: 700; color: {score_col};">{fw_score}%</div>
+                        <div class="metric-subtitle">Pass: <strong style="color: #10b981;">{fw_pass}</strong> | Fail: <strong style="color: #ef4444;">{fw_fail}</strong></div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+    # TAB 2: COMPLIANCE POSTURE
+    with tab_compliance:
+        st.markdown("#### 📜 Regulatory & Industry Compliance Frameworks")
+        st.markdown("Continuous automated audit against CIS Benchmarks, NIST CSF, PCI-DSS, ISO 27001, and SOC 2.")
+
+        compliance_overview = summary_data.get("compliance_overview", {})
+        if compliance_overview:
+            fw_names = list(compliance_overview.keys())
+            avg_score = round(sum(s.get("score", 0) for s in compliance_overview.values()) / len(compliance_overview), 1)
+            
+            top_col1, top_col2, top_col3 = st.columns(3)
+            top_col1.metric("Frameworks Evaluated", len(compliance_overview))
+            top_col2.metric("Average Compliance Score", f"{avg_score}%")
+            top_col3.metric("Total Compliance Controls Tested", sum(s.get("total", 0) for s in compliance_overview.values()))
+
+            st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
+
+            for fw, stats in compliance_overview.items():
+                fw_score = stats.get("score", 100.0)
+                passed = stats.get("passed", 0)
+                failed = stats.get("failed", 0)
+                total = stats.get("total", 0)
+                req_count = stats.get("requirements_count", 0)
+
+                with st.expander(f"📌 {fw} — Score: {fw_score}% ({passed}/{total} Passed)", expanded=(fw == fw_names[0])):
+                    fc1, fc2, fc3, fc4 = st.columns([1.5, 1, 1, 1])
+                    fc1.progress(fw_score / 100.0, text=f"Compliance Score: {fw_score}%")
+                    fc2.metric("Passing Checks", passed)
+                    fc3.metric("Failing Checks", failed, delta_color="inverse")
+                    fc4.metric("Sections/Reqs", req_count)
+
+                    # Filter findings belonging to this framework
+                    fw_findings = [f for f in findings_data if isinstance(f.get("compliance"), dict) and fw in f.get("compliance", {})]
+
+                    # Action buttons for framework PDF and CSV reports
+                    b_col1, b_col2, _ = st.columns([1.2, 1.2, 2.6])
+                    auth_param = f"?api_key={current_api_key}" if current_api_key else ""
+                    with b_col1:
+                        if not st.session_state["demo_mode"] and active_id:
+                            st.link_button(f"📕 {fw} PDF Report", f"{current_api_url}/api/v1/scans/{active_id}/compliance/{fw}/pdf{auth_param}", use_container_width=True)
+                        else:
+                            try:
+                                from src.reports.pdf_generator import generate_compliance_pdf_report
+                                comp_pdf_buf = generate_compliance_pdf_report(fw, summary_data, findings_data)
+                                st.download_button(f"📕 {fw} PDF", data=comp_pdf_buf.getvalue(), file_name=f"prowler_{fw}_report.pdf", mime="application/pdf", use_container_width=True, key=f"dl_tab2_pdf_{fw}")
+                            except Exception:
+                                st.button(f"📕 {fw} PDF", disabled=True, use_container_width=True, key=f"btn_tab2_pdf_err_{fw}")
+                    with b_col2:
+                        if not st.session_state["demo_mode"] and active_id:
+                            st.link_button(f"📄 {fw} CSV Export", f"{current_api_url}/api/v1/scans/{active_id}/compliance/{fw}/csv{auth_param}", use_container_width=True)
+                        else:
+                            try:
+                                from src.reports.csv_generator import generate_compliance_csv
+                                comp_csv_buf = generate_compliance_csv(findings_data, fw)
+                                st.download_button(f"📄 {fw} CSV", data=comp_csv_buf.getvalue(), file_name=f"prowler_{fw}_findings.csv", mime="text/csv", use_container_width=True, key=f"dl_tab2_csv_{fw}")
+                            except Exception:
+                                st.button(f"📄 {fw} CSV", disabled=True, use_container_width=True, key=f"btn_tab2_csv_err_{fw}")
+
+                    if fw_findings:
+                        st.markdown("**Mapped Checks & Requirement Status:**")
+                        df_fw = []
+                        for f in fw_findings:
+                            reqs_str = ", ".join(f["compliance"].get(fw, []))
+                            df_fw.append({
+                                "Requirement": reqs_str,
+                                "Status": f.get("status"),
+                                "Severity": f.get("severity"),
+                                "Service": f.get("service", "").upper(),
+                                "Check Title": f.get("check_title"),
+                                "Resource": f.get("resource_id")
+                            })
+                        st.dataframe(pd.DataFrame(df_fw), use_container_width=True, height=250)
+        else:
+            st.info("No compliance framework mapping available for this scan.")
+
+    # TAB 3: FINDINGS EXPLORER
     with tab_findings:
         st.markdown("#### 🔍 Filter & Investigate Vulnerabilities")
         
@@ -868,17 +1295,137 @@ if summary_data:
                     exp_title = f"{'🔴' if stat == 'FAIL' else '🟢'} [{stat}] {item.get('check_title')} — {item.get('service', '').upper()} ({sev.upper()})"
                     
                     with st.expander(exp_title, expanded=(idx < 2 and stat == 'FAIL')):
-                        det_col1, det_col2 = st.columns([2.2, 1])
-                        with det_col1:
-                            st.markdown(f"**Resource:** `{item.get('resource_id')}`")
-                            st.markdown(f"**Region:** `{item.get('region', 'global')}` | **Check ID:** `{item.get('check_id')}`")
-                            st.markdown(f"**Details:** {item.get('description') or item.get('status_extended')}")
-                        with det_col2:
-                            st.markdown(f"**Severity:** <span class='{badge_class}'>{sev.upper()}</span>", unsafe_allow_html=True)
+                        d_tab_overview, d_tab_remediation, d_tab_evidence, d_tab_other, d_tab_compliance, d_tab_scans, d_tab_events = st.tabs([
+                            "📋 Overview",
+                            "💡 Remediation",
+                            "🔬 Evidence",
+                            "🔗 Other Findings on Resource",
+                            "📜 Compliance",
+                            "⏱️ Scans",
+                            "⚡ Events"
+                        ])
+
+                        # 1. OVERVIEW
+                        with d_tab_overview:
+                            if item.get("risk"):
+                                st.markdown(f"""
+                                <div class="risk-alert-box">
+                                    <strong>⚠️ Threat & Risk Impact:</strong><br>{item.get('risk')}
+                                </div>
+                                """, unsafe_allow_html=True)
+                            st.markdown(f"**Description:** {item.get('description') or item.get('status_extended')}")
+                            
+                            refs = item.get("references") or []
+                            if not refs and item.get("remediation_url"):
+                                refs = [item.get("remediation_url")]
+                            if refs:
+                                st.markdown("**References & Official Documentation:**")
+                                for r in refs:
+                                    if r:
+                                        st.markdown(f"- 🔗 [{r}]({r})")
+
+                            cats = item.get("categories", [])
+                            if cats:
+                                cat_pills = " ".join([f'<span class="cat-badge">{c}</span>' for c in cats])
+                                st.markdown(f"**Categories:** {cat_pills}", unsafe_allow_html=True)
+
+                            st.markdown(f"""
+                            <div class="info-grid-box">
+                                <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; font-size: 0.8rem;">
+                                    <div><strong>Check ID:</strong><br><code style="color: #38bdf8;">{item.get('check_id')}</code></div>
+                                    <div><strong>Finding ID:</strong><br><code>{item.get('id') or '-'}</code></div>
+                                    <div><strong>Finding UID:</strong><br><code style="color: #94a3b8;">{item.get('uid') or item.get('id') or '-'}</code></div>
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
+
+                        # 2. REMEDIATION
+                        with d_tab_remediation:
                             if item.get("remediation"):
-                                st.info(f"💡 **Remediation:**\n{item.get('remediation')}")
+                                st.markdown(f"**Action Plan:** {item.get('remediation')}")
+                            if item.get("remediation_cli"):
+                                st.markdown("**CLI Remediation Snippet:**")
+                                st.code(item.get("remediation_cli"), language="bash")
                             if item.get("remediation_url"):
-                                st.markdown(f"[📖 Official AWS Remediation Guide]({item.get('remediation_url')})")
+                                st.markdown(f"[📖 Open Official Remediation Documentation]({item.get('remediation_url')})")
+
+                        # 3. EVIDENCE
+                        with d_tab_evidence:
+                            st.markdown(f"**Resource ARN:** `{item.get('resource_id')}`")
+                            st.markdown(f"**Region:** `{item.get('region', 'global')}` | **Service:** `{item.get('service', '').upper()}`")
+                            st.markdown(f"**Raw Detection Evidence:**\n```\n{item.get('status_extended') or item.get('description')}\n```")
+
+                        # 4. OTHER FINDINGS ON THIS RESOURCE
+                        with d_tab_other:
+                            res_id = item.get("resource_id")
+                            other_findings = [f for f in findings_data if f.get("resource_id") == res_id and f.get("id") != item.get("id")]
+                            if other_findings:
+                                st.markdown(f"Found **{len(other_findings)}** additional check(s) evaluated on this resource:")
+                                df_other = pd.DataFrame([{
+                                    "Status": f.get("status"),
+                                    "Severity": f.get("severity"),
+                                    "Check": f.get("check_title"),
+                                    "Check ID": f.get("check_id")
+                                } for f in other_findings])
+                                st.dataframe(df_other, use_container_width=True, height=180)
+                            else:
+                                st.info("No other checks associated with this specific resource.")
+
+                        # 5. COMPLIANCE MAPPING
+                        with d_tab_compliance:
+                            comp = item.get("compliance", {})
+                            if comp and isinstance(comp, dict):
+                                st.markdown("**Standards & Requirements Violated:**")
+                                comp_pills = []
+                                for fw_k, req_list in comp.items():
+                                    req_str = ", ".join(req_list) if isinstance(req_list, list) else str(req_list)
+                                    comp_pills.append(f'<span class="compliance-pill"><strong>{fw_k}:</strong> {req_str}</span>')
+                                st.markdown(" ".join(comp_pills), unsafe_allow_html=True)
+                            else:
+                                st.caption("No compliance framework mapping declared for this check.")
+
+                        # 6. SCANS
+                        with d_tab_scans:
+                            scan_id_val = item.get("scan_id") or active_id or "scan_current"
+                            acc_id_val = (summary_data.get("account_id") if summary_data else None) or "AWS Account"
+                            dur_val = (summary_data.get("duration_seconds") if summary_data else None) or 0
+                            sc_col1, sc_col2, sc_col3 = st.columns(3)
+                            sc_col1.markdown(f"**Evaluating Scan:**<br>`{scan_id_val}`", unsafe_allow_html=True)
+                            sc_col2.markdown(f"**Target Account:**<br>`{acc_id_val}`", unsafe_allow_html=True)
+                            sc_col3.markdown(f"**Duration:**<br>`{dur_val} seconds`", unsafe_allow_html=True)
+                            
+                            st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+                            st.markdown(f"""
+                            <div class="info-grid-box" style="font-size: 0.85rem;">
+                                <div><strong>Scan State:</strong> <span class="badge-pass">COMPLETED</span></div>
+                                <div style="margin-top: 4px;"><strong>Assessment Trigger:</strong> Scheduled / On-Demand API</div>
+                                <div style="margin-top: 4px;"><strong>Total Scanned Resources:</strong> {len(assets_data)} resources</div>
+                            </div>
+                            """, unsafe_allow_html=True)
+
+                        # 7. EVENTS
+                        with d_tab_events:
+                            ts_val = item.get("timestamp") or "Just now"
+                            st.markdown("**Audit Trail & Security Event Timeline:**")
+                            st.markdown(f"""
+                            <div style="border-left: 2px solid #38bdf8; padding-left: 14px; margin-left: 6px; font-size: 0.82rem; line-height: 1.6;">
+                                <div style="margin-bottom: 10px;">
+                                    <span style="color: #38bdf8; font-weight: 600;">● Scan Execution Started</span><br>
+                                    <span style="color: #94a3b8;">Triggered security baseline evaluation across target regions.</span>
+                                </div>
+                                <div style="margin-bottom: 10px;">
+                                    <span style="color: #38bdf8; font-weight: 600;">● Cloud Asset Discovered</span><br>
+                                    <span style="color: #94a3b8;">Identified resource <code>{item.get('resource_id')}</code> ({item.get('service', '').upper()})</span>
+                                </div>
+                                <div style="margin-bottom: 10px;">
+                                    <span style="color: {'#ef4444' if stat == 'FAIL' else '#22c55e'}; font-weight: 600;">● Rule Evaluation: {stat}</span><br>
+                                    <span style="color: #94a3b8;">Check <code>{item.get('check_id')}</code> evaluated with severity <strong style="text-transform: uppercase;">{sev}</strong>.</span>
+                                </div>
+                                <div>
+                                    <span style="color: #94a3b8; font-size: 0.75rem;">Recorded at {ts_val}</span>
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
             else:
                 # Tabular Data Grid View
                 df_findings = pd.DataFrame(filtered_findings)
@@ -892,9 +1439,7 @@ if summary_data:
         else:
             st.info("No findings match the selected filters.")
 
-    # --------------------------------------------------------------------------
-    # TAB 3: CLOUD ASSET INVENTORY
-    # --------------------------------------------------------------------------
+    # TAB 4: CLOUD ASSET INVENTORY
     with tab_assets:
         st.markdown("#### ☁️ Cloud Attack Surface Asset Inventory")
         st.markdown("Asset-to-vulnerability mapping for enterprise compliance and posture monitoring.")
@@ -934,64 +1479,242 @@ if summary_data:
 
             display_cols = [c for c in ["resource_name", "service", "region", "status", "critical_failures", "high_failures", "total_checks_evaluated", "resource_arn"] if c in df_assets.columns]
             st.dataframe(df_assets[display_cols], use_container_width=True)
+
+            # Interactive Asset Drilldown
+            st.markdown("---")
+            st.markdown("##### 🔎 Asset Vulnerability Deep-Dive")
+            asset_options = [a.get("resource_name") or a.get("resource_arn") for a in assets_data]
+            selected_asset_name = st.selectbox("Select Cloud Asset to Inspect Security Details", asset_options, index=0)
+            
+            target_asset = next((a for a in assets_data if (a.get("resource_name") or a.get("resource_arn")) == selected_asset_name), None)
+            if target_asset:
+                target_arn = target_asset.get("resource_arn")
+                ac1, ac2, ac3 = st.columns([2, 1, 1])
+                with ac1:
+                    st.markdown(f"**ARN:** `{target_arn}`")
+                    st.markdown(f"**Service:** `{target_asset.get('service', '').upper()}` | **Region:** `{target_asset.get('region', 'global')}`")
+                with ac2:
+                    stat_badge = '<span class="badge-critical">🔴 VULNERABLE</span>' if target_asset.get("status") == "vulnerable" else '<span class="badge-pass">🟢 SECURE</span>'
+                    st.markdown(f"**Posture Status:** {stat_badge}", unsafe_allow_html=True)
+                with ac3:
+                    st.metric("Total Checks Evaluated", target_asset.get("total_checks_evaluated", 0))
+
+                # Query all findings for this asset
+                asset_findings = [f for f in findings_data if f.get("resource_id") == target_arn]
+                failed_asset_findings = [f for f in asset_findings if (f.get("status") or "").upper() == "FAIL"]
+                
+                st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+                a_tab_overview, a_tab_remediation, a_tab_evidence, a_tab_checks, a_tab_scans, a_tab_events = st.tabs([
+                    "📋 Overview",
+                    "💡 Remediation & Risks",
+                    "🔬 Evidence & Tags",
+                    "🔗 Evaluated Checks",
+                    "⏱️ Scans",
+                    "⚡ Events"
+                ])
+                
+                with a_tab_overview:
+                    st.markdown(f"**Resource Name:** `{target_asset.get('resource_name', '-')}`")
+                    st.markdown(f"**ARN / URI:** `{target_arn}`")
+                    tags = target_asset.get("tags") or []
+                    if tags:
+                        tag_badges = " ".join([f'<span class="cat-badge">{t}</span>' for t in tags])
+                        st.markdown(f"**Resource Tags:** {tag_badges}", unsafe_allow_html=True)
+                    st.markdown(f"""
+                    <div class="info-grid-box">
+                        <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; font-size: 0.8rem;">
+                            <div><strong>Critical Risks:</strong><br><span style="color: #dc2626; font-weight: 700;">{target_asset.get('critical_failures', 0)}</span></div>
+                            <div><strong>High Risks:</strong><br><span style="color: #ea580c; font-weight: 700;">{target_asset.get('high_failures', 0)}</span></div>
+                            <div><strong>Total Evaluated:</strong><br><span style="font-weight: 700;">{target_asset.get('total_checks_evaluated', len(asset_findings))}</span></div>
+                            <div><strong>Region:</strong><br><code>{target_asset.get('region', 'global')}</code></div>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                with a_tab_remediation:
+                    if failed_asset_findings:
+                        st.markdown(f"Found **{len(failed_asset_findings)}** active compliance/security violation(s) requiring remediation:")
+                        for fa in failed_asset_findings:
+                            fa_sev = (fa.get("severity") or "low").upper()
+                            with st.expander(f"⚠️ [{fa_sev}] {fa.get('check_title') or fa.get('check_id')}", expanded=True):
+                                if fa.get("risk"):
+                                    st.markdown(f"**Threat Impact:** {fa.get('risk')}")
+                                if fa.get("remediation"):
+                                    st.markdown(f"**Action Plan:** {fa.get('remediation')}")
+                                if fa.get("remediation_cli"):
+                                    st.code(fa.get("remediation_cli"), language="bash")
+                                if fa.get("remediation_url"):
+                                    st.markdown(f"[📖 Documentation]({fa.get('remediation_url')})")
+                    else:
+                        st.success("🟢 No active vulnerabilities detected on this cloud asset.")
+
+                with a_tab_evidence:
+                    st.markdown("**Asset Metadata & Discovery Attributes:**")
+                    st.json({
+                        "resource_arn": target_arn,
+                        "resource_name": target_asset.get("resource_name"),
+                        "service": target_asset.get("service"),
+                        "region": target_asset.get("region"),
+                        "status": target_asset.get("status"),
+                        "tags": target_asset.get("tags", []),
+                        "critical_failures": target_asset.get("critical_failures", 0),
+                        "high_failures": target_asset.get("high_failures", 0),
+                        "total_checks": target_asset.get("total_checks_evaluated", len(asset_findings))
+                    })
+
+                with a_tab_checks:
+                    if asset_findings:
+                        df_af = pd.DataFrame([{
+                            "Status": f.get("status"),
+                            "Severity": (f.get("severity") or "").upper(),
+                            "Check Title": f.get("check_title"),
+                            "Check ID": f.get("check_id"),
+                            "Description": f.get("description") or f.get("status_extended")
+                        } for f in asset_findings])
+                        st.dataframe(df_af, use_container_width=True, height=220)
+                    else:
+                        st.info("No specific findings mapped to this asset ARN.")
+
+                with a_tab_scans:
+                    scan_id_val = active_id or "scan_current"
+                    acc_id_val = (summary_data.get("account_id") if summary_data else None) or "AWS Account"
+                    dur_val = (summary_data.get("duration_seconds") if summary_data else None) or 0
+                    sc_col1, sc_col2, sc_col3 = st.columns(3)
+                    sc_col1.markdown(f"**Evaluating Scan:**<br>`{scan_id_val}`", unsafe_allow_html=True)
+                    sc_col2.markdown(f"**Target Account:**<br>`{acc_id_val}`", unsafe_allow_html=True)
+                    sc_col3.markdown(f"**Duration:**<br>`{dur_val} seconds`", unsafe_allow_html=True)
+                    st.markdown(f"""
+                    <div class="info-grid-box" style="font-size: 0.85rem; margin-top: 10px;">
+                        <div><strong>Scan Posture:</strong> <span class="badge-pass">COMPLETED</span></div>
+                        <div style="margin-top: 4px;"><strong>Assessment Engine:</strong> Prowler v5 Cloud Security Engine</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                with a_tab_events:
+                    st.markdown("**Asset Audit Trail & Discovery Events:**")
+                    st.markdown(f"""
+                    <div style="border-left: 2px solid #38bdf8; padding-left: 14px; margin-left: 6px; font-size: 0.82rem; line-height: 1.6;">
+                        <div style="margin-bottom: 10px;">
+                            <span style="color: #38bdf8; font-weight: 600;">● Cloud Asset Discovery</span><br>
+                            <span style="color: #94a3b8;">Resource identified in region <code>{target_asset.get('region', 'global')}</code></span>
+                        </div>
+                        <div style="margin-bottom: 10px;">
+                            <span style="color: #38bdf8; font-weight: 600;">● Security Baseline Assessment</span><br>
+                            <span style="color: #94a3b8;">Evaluated {target_asset.get('total_checks_evaluated', len(asset_findings))} rules against CIS & Best Practice benchmarks</span>
+                        </div>
+                        <div>
+                            <span style="color: {'#ef4444' if target_asset.get('status') == 'vulnerable' else '#22c55e'}; font-weight: 600;">● Posture Established: {target_asset.get('status', 'secure').upper()}</span><br>
+                            <span style="color: #94a3b8;">Posture state updated in asset catalog</span>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
         else:
             st.info("No assets discovered or asset data not available.")
 
-    # --------------------------------------------------------------------------
-    # TAB 4: REPORTS & EXPORT BUNDLES
-    # --------------------------------------------------------------------------
+    # TAB 5: REPORTS & EXPORT BUNDLES
     with tab_reports:
         st.markdown("#### 📥 Enterprise Deliverables & Compliance Bundles")
-        st.markdown("Download full assessment reports in standard industry formats (OCSF JSON, CSV, and interactive HTML).")
+        st.markdown("Download full assessment reports in standard industry formats (Executive PDF, OCSF JSON, CSV, and interactive HTML).")
 
-        rep_col1, rep_col2, rep_col3 = st.columns(3)
-        
-        with rep_col1:
+        rep_col_pdf, rep_col_zip, rep_col_html, rep_col_csv = st.columns(4)
+        auth_param = f"?api_key={current_api_key}" if current_api_key else ""
+
+        with rep_col_pdf:
+            st.markdown("""
+            <div class="metric-card">
+                <div class="metric-title">Executive PDF Deliverable</div>
+                <div style="font-size: 1.15rem; font-weight: 700; margin: 8px 0; color: #38bdf8;">📕 Executive Report (.pdf)</div>
+                <div class="metric-subtitle">Publication-grade audit report for C-suite, board, and auditors.</div>
+            </div>
+            """, unsafe_allow_html=True)
+            if not st.session_state["demo_mode"] and active_id:
+                st.link_button("📕 Open Executive PDF", f"{current_api_url}/api/v1/scans/{active_id}/report-pdf{auth_param}", use_container_width=True)
+            else:
+                try:
+                    from src.reports.pdf_generator import generate_executive_pdf_report
+                    demo_pdf_buf = generate_executive_pdf_report(SAMPLE_DEMO_DATA["summary"], SAMPLE_DEMO_DATA["findings"], SAMPLE_DEMO_DATA["assets"])
+                    st.download_button("📕 Download Demo PDF", data=demo_pdf_buf.getvalue(), file_name="prowler_executive_report_demo.pdf", mime="application/pdf", use_container_width=True, key="dl_tab5_exec_pdf")
+                except Exception as e:
+                    st.button("📕 Executive PDF (Online Only)", disabled=True, use_container_width=True, key="btn_tab5_exec_err")
+
+        with rep_col_zip:
             st.markdown("""
             <div class="metric-card">
                 <div class="metric-title">Complete Scan Archive</div>
-                <div style="font-size: 1.2rem; font-weight: 700; margin: 8px 0;">📦 Full Bundle (.zip)</div>
-                <div class="metric-subtitle">Includes findings.json, assets.json, summary.json, CSV & HTML report.</div>
+                <div style="font-size: 1.15rem; font-weight: 700; margin: 8px 0;">📦 Full Bundle (.zip)</div>
+                <div class="metric-subtitle">Includes PDF, findings.json, assets.json, summary.json, CSV & HTML.</div>
             </div>
             """, unsafe_allow_html=True)
             if not st.session_state["demo_mode"] and active_id:
-                auth_param = f"?api_key={current_api_key}" if current_api_key else ""
                 st.link_button("⬇️ Download .ZIP Bundle", f"{current_api_url}/api/v1/scans/{active_id}/download-zip{auth_param}", use_container_width=True)
             else:
                 demo_zip_bytes = json.dumps(SAMPLE_DEMO_DATA, indent=2).encode('utf-8')
-                st.download_button("⬇️ Download Demo Archive (JSON)", data=demo_zip_bytes, file_name="prowler_demo_bundle.json", mime="application/json", use_container_width=True)
+                st.download_button("⬇️ Download Demo Archive (JSON)", data=demo_zip_bytes, file_name="prowler_demo_bundle.json", mime="application/json", use_container_width=True, key="dl_tab5_zip_demo")
 
-        with rep_col2:
+        with rep_col_html:
             st.markdown("""
             <div class="metric-card">
-                <div class="metric-title">Executive HTML Report</div>
-                <div style="font-size: 1.2rem; font-weight: 700; margin: 8px 0;">🌐 Interactive Dashboard</div>
-                <div class="metric-subtitle">Visual, standalone HTML report for C-suite and auditors.</div>
+                <div class="metric-title">Interactive HTML Report</div>
+                <div style="font-size: 1.15rem; font-weight: 700; margin: 8px 0;">🌐 Standalone HTML</div>
+                <div class="metric-subtitle">Visual, interactive HTML report with embedded search and charts.</div>
             </div>
             """, unsafe_allow_html=True)
             if not st.session_state["demo_mode"] and active_id:
-                auth_param = f"?api_key={current_api_key}" if current_api_key else ""
                 st.link_button("🌐 Open HTML Report", f"{current_api_url}/api/v1/scans/{active_id}/report-html{auth_param}", use_container_width=True)
             else:
-                st.button("🌐 Open HTML Report (Online Scans Only)", disabled=True, use_container_width=True)
+                st.button("🌐 Open HTML Report (Online Scans Only)", disabled=True, use_container_width=True, key="btn_tab5_html_err")
 
-        with rep_col3:
+        with rep_col_csv:
             st.markdown("""
             <div class="metric-card">
                 <div class="metric-title">Tabular Findings</div>
-                <div style="font-size: 1.2rem; font-weight: 700; margin: 8px 0;">📄 Spreadsheet (.csv)</div>
+                <div style="font-size: 1.15rem; font-weight: 700; margin: 8px 0;">📄 Spreadsheet (.csv)</div>
                 <div class="metric-subtitle">Raw security findings ready for Excel, Jira, or SIEM ingestion.</div>
             </div>
             """, unsafe_allow_html=True)
-            if findings_data:
+            if not st.session_state["demo_mode"] and active_id:
+                st.link_button("⬇️ Direct CSV Download", f"{current_api_url}/api/v1/scans/{active_id}/report-csv{auth_param}", use_container_width=True)
+            elif findings_data:
                 csv_bytes = pd.DataFrame(findings_data).to_csv(index=False).encode('utf-8')
                 st.download_button(
                     label="⬇️ Download Findings CSV",
                     data=csv_bytes,
                     file_name=f"prowler_findings_{active_id or 'demo'}.csv",
                     mime="text/csv",
-                    use_container_width=True
+                    use_container_width=True,
+                    key="dl_tab5_findings_csv"
                 )
+
+        # Compliance Framework Exports Matrix
+        comp_overview = summary_data.get("compliance_overview", {})
+        if comp_overview:
+            st.markdown("---")
+            st.markdown("##### 📜 Framework-Specific Compliance Reports (PDF & CSV)")
+            st.caption("Generate tailored compliance evidence for regulatory audits:")
+            
+            cf_col_sel, cf_col_pdf, cf_col_csv = st.columns([2, 1, 1])
+            with cf_col_sel:
+                selected_fw = st.selectbox("Select Target Compliance Standard", list(comp_overview.keys()), index=0, key="sb_tab5_compliance_fw")
+            with cf_col_pdf:
+                if not st.session_state["demo_mode"] and active_id:
+                    st.link_button(f"📕 {selected_fw} PDF", f"{current_api_url}/api/v1/scans/{active_id}/compliance/{selected_fw}/pdf{auth_param}", use_container_width=True)
+                else:
+                    try:
+                        from src.reports.pdf_generator import generate_compliance_pdf_report
+                        cf_pdf_buf = generate_compliance_pdf_report(selected_fw, summary_data, findings_data)
+                        st.download_button(f"📕 Download {selected_fw} PDF", data=cf_pdf_buf.getvalue(), file_name=f"prowler_{selected_fw}_report.pdf", mime="application/pdf", use_container_width=True, key=f"dl_tab5_pdf_{selected_fw}")
+                    except Exception:
+                        st.button(f"📕 {selected_fw} PDF", disabled=True, use_container_width=True, key=f"btn_tab5_pdf_err_{selected_fw}")
+            with cf_col_csv:
+                if not st.session_state["demo_mode"] and active_id:
+                    st.link_button(f"📄 {selected_fw} CSV", f"{current_api_url}/api/v1/scans/{active_id}/compliance/{selected_fw}/csv{auth_param}", use_container_width=True)
+                else:
+                    try:
+                        from src.reports.csv_generator import generate_compliance_csv
+                        cf_csv_buf = generate_compliance_csv(findings_data, selected_fw)
+                        st.download_button(f"📄 Download {selected_fw} CSV", data=cf_csv_buf.getvalue(), file_name=f"prowler_{selected_fw}_findings.csv", mime="text/csv", use_container_width=True, key=f"dl_tab5_csv_{selected_fw}")
+                    except Exception:
+                        st.button(f"📄 {selected_fw} CSV", disabled=True, use_container_width=True, key=f"btn_tab5_csv_err_{selected_fw}")
 
         # JSON Summary Inspector
         with st.expander("🔍 View Raw Audit Metadata (`summary.json`)"):

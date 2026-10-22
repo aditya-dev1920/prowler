@@ -1,6 +1,7 @@
 services:
   # 1. FastAPI REST Microservice
   iasm-api:
+    image: prowler-iasm:latest
     build:
       context: .
       dockerfile: Dockerfile
@@ -17,9 +18,12 @@ services:
       - SCAN_OUTPUT_DIR=/app/scan_results
       - CORS_ORIGINS=*
     volumes:
+      # Live development mount: code changes reflect immediately without rebuilding Docker
+      - ./src:/app/src
+      - ./run_scan.sh:/app/run_scan.sh
       # Persist scan reports, JSON data, and downloadable ZIP bundles on the host
       - ./scan_results:/app/scan_results
-    command: ["uvicorn", "src.api.api:app", "--host", "0.0.0.0", "--port", "3755"]
+    command: ["uvicorn", "src.api.api:app", "--host", "0.0.0.0", "--port", "3755", "--reload"]
     deploy:
       resources:
         limits:
@@ -29,6 +33,7 @@ services:
 
   # 2. Streamlit Interactive Dashboard
   iasm-ui:
+    image: prowler-iasm:latest
     build:
       context: .
       dockerfile: Dockerfile
@@ -41,6 +46,8 @@ services:
     environment:
       - API_BASE_URL=http://iasm-api:3755
     volumes:
+      # Live development mount: Streamlit hot-reloads instantly on code changes
+      - ./src:/app/src
       - ./scan_results:/app/scan_results
     command: ["streamlit", "run", "src/streamlit/streamlit.py", "--server.port=8501", "--server.address=0.0.0.0"]
     deploy:

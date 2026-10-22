@@ -73,6 +73,22 @@ def mock_scan_artifacts(temp_output_dir: Path):
             "s3": {"PASS": 1, "FAIL": 1, "pass": 1, "fail": 1},
             "iam": {"PASS": 1, "FAIL": 0, "pass": 1, "fail": 0}
         },
+        "compliance_overview": {
+            "CIS-AWS-3.0": {
+                "passed": 2,
+                "failed": 1,
+                "total": 3,
+                "score": 66.7,
+                "requirements_count": 3
+            },
+            "PCI-DSS-4.0": {
+                "passed": 2,
+                "failed": 0,
+                "total": 2,
+                "score": 100.0,
+                "requirements_count": 2
+            }
+        },
         "total_assets_scanned": 2
     }
     with open(scan_dir / "summary.json", "w", encoding="utf-8") as f:
@@ -81,6 +97,7 @@ def mock_scan_artifacts(temp_output_dir: Path):
     findings = [
         {
             "id": "f-1",
+            "uid": "prowler-aws-s3-public-access-001",
             "check_id": "s3_bucket_public_access",
             "check_title": "S3 Public Access Block Disabled",
             "service": "s3",
@@ -91,10 +108,20 @@ def mock_scan_artifacts(temp_output_dir: Path):
             "resource_id": "arn:aws:s3:::my-public-bucket",
             "resource_name": "my-public-bucket",
             "description": "Bucket public access block is disabled.",
-            "status_extended": "Bucket my-public-bucket allows public access."
+            "status_extended": "Bucket my-public-bucket allows public access.",
+            "risk": "Public S3 buckets allow unauthenticated access leading to critical data breaches.",
+            "categories": ["storage", "data-protection"],
+            "compliance": {"CIS-AWS-3.0": ["2.1.4"], "PCI-DSS-4.0": ["3.4.1"]},
+            "remediation": "Enable S3 Block Public Access at the bucket level.",
+            "remediation_cli": "aws s3api put-public-access-block --bucket my-public-bucket --public-access-block-configuration 'BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true'",
+            "remediation_url": "https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-control-block-public-access.html",
+            "references": ["https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-control-block-public-access.html"],
+            "scan_id": scan_id,
+            "timestamp": "2026-10-21T18:00:00Z"
         },
         {
             "id": "f-2",
+            "uid": "prowler-aws-s3-encryption-002",
             "check_id": "s3_bucket_default_encryption",
             "check_title": "S3 Default Encryption Enabled",
             "service": "s3",
@@ -105,10 +132,20 @@ def mock_scan_artifacts(temp_output_dir: Path):
             "resource_id": "arn:aws:s3:::my-public-bucket",
             "resource_name": "my-public-bucket",
             "description": "Bucket has default SSE-S3 encryption enabled.",
-            "status_extended": "Bucket encrypted."
+            "status_extended": "Bucket encrypted.",
+            "risk": "Unencrypted buckets expose resting data to unauthorized physical media extraction.",
+            "categories": ["encryption", "storage"],
+            "compliance": {"CIS-AWS-3.0": ["2.1.1"], "PCI-DSS-4.0": ["3.4.1"]},
+            "remediation": "Enable default encryption.",
+            "remediation_cli": "aws s3api put-bucket-encryption --bucket my-public-bucket",
+            "remediation_url": "",
+            "references": [],
+            "scan_id": scan_id,
+            "timestamp": "2026-10-21T18:00:00Z"
         },
         {
             "id": "f-3",
+            "uid": "prowler-aws-iam-root-mfa-003",
             "check_id": "iam_root_mfa_enabled",
             "check_title": "Root Account MFA Enabled",
             "service": "iam",
@@ -119,7 +156,16 @@ def mock_scan_artifacts(temp_output_dir: Path):
             "resource_id": "arn:aws:iam::123456789012:root",
             "resource_name": "root",
             "description": "Hardware MFA is configured for root.",
-            "status_extended": "MFA active."
+            "status_extended": "MFA active.",
+            "risk": "Root account without MFA is susceptible to credential stuffing and takeover.",
+            "categories": ["identity-and-access-management", "mfa"],
+            "compliance": {"CIS-AWS-3.0": ["1.5"]},
+            "remediation": "Configure MFA for root account.",
+            "remediation_cli": "",
+            "remediation_url": "",
+            "references": [],
+            "scan_id": scan_id,
+            "timestamp": "2026-10-21T18:00:00Z"
         }
     ]
     with open(scan_dir / "findings.json", "w", encoding="utf-8") as f:
@@ -134,7 +180,23 @@ def mock_scan_artifacts(temp_output_dir: Path):
             "status": "vulnerable",
             "critical_failures": 1,
             "high_failures": 0,
-            "total_checks_evaluated": 2
+            "total_checks_evaluated": 2,
+            "failed_checks": [
+                {
+                    "check_id": "s3_bucket_public_access",
+                    "check_title": "S3 Public Access Block Disabled",
+                    "severity": "critical",
+                    "status": "FAIL"
+                }
+            ],
+            "passed_checks": [
+                {
+                    "check_id": "s3_bucket_default_encryption",
+                    "check_title": "S3 Default Encryption Enabled",
+                    "severity": "high",
+                    "status": "PASS"
+                }
+            ]
         },
         {
             "resource_arn": "arn:aws:iam::123456789012:root",
@@ -144,7 +206,16 @@ def mock_scan_artifacts(temp_output_dir: Path):
             "status": "secure",
             "critical_failures": 0,
             "high_failures": 0,
-            "total_checks_evaluated": 1
+            "total_checks_evaluated": 1,
+            "failed_checks": [],
+            "passed_checks": [
+                {
+                    "check_id": "iam_root_mfa_enabled",
+                    "check_title": "Root Account MFA Enabled",
+                    "severity": "critical",
+                    "status": "PASS"
+                }
+            ]
         }
     ]
     with open(scan_dir / "assets.json", "w", encoding="utf-8") as f:
