@@ -1,0 +1,21 @@
+services:
+  neo4j:
+    healthcheck:
+      start_period: 120s
+      retries: 15
+
+  api:
+    volumes:
+      - ./api/src/backend:/home/prowler/backend
+      - ./prowler:/home/prowler/.venv/lib/python3.12/site-packages/prowler
+
+  worker:
+    volumes:
+      - ./api/src/backend:/home/prowler/backend
+      - ./prowler:/home/prowler/.venv/lib/python3.12/site-packages/prowler
+
+  worker-beat:
+    volumes:
+      - ./api/src/backend:/home/prowler/backend
+      - ./prowler:/home/prowler/.venv/lib/python3.12/site-packages/prowler
+

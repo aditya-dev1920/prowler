@@ -437,6 +437,8 @@ async def execute_prowler_scan(scan_id: str, req: ScanRequest):
                             lf.write(line)
                             lf.flush()
                             buffer.append(line)
+                            sys.stdout.write(line)
+                            sys.stdout.flush()
                 except Exception as e:
                     logger.debug(f"Log streaming completed or ended for [{scan_id}]: {e}")
 

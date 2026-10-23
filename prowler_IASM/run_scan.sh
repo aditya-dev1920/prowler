@@ -182,6 +182,9 @@ CMD+=(--output-modes "json-ocsf" "csv" "html")
 CMD+=(--excluded-service "inspector2")
 CMD+=(--ignore-exit-code-3)
 CMD+=(--no-banner)
+CMD+=(--verbose)
+CMD+=(--only-logs)
+CMD+=(--log-level "ERROR")
 
 CMD+=(--region "${REGION_ARRAY[@]}")
 
@@ -214,8 +217,13 @@ OCSF_FILE="${TARGET_DIR}/report.ocsf.json"
 
 # Run scanner and capture exit code (ignore code 3 since fail checks exit 3)
 set +e
-"${CMD[@]}" > "${TARGET_DIR}/scan_execution.log" 2>&1
-PROWLER_EXIT_CODE=$?
+if command -v tee &> /dev/null; then
+    "${CMD[@]}" 2>&1 | tee "${TARGET_DIR}/scan_execution.log"
+    PROWLER_EXIT_CODE=${PIPESTATUS[0]}
+else
+    "${CMD[@]}" > "${TARGET_DIR}/scan_execution.log" 2>&1
+    PROWLER_EXIT_CODE=$?
+fi
 set -e
 END_TIME=$(date +%s)
 DURATION=$((END_TIME - START_TIME))
@@ -308,7 +316,10 @@ if ocsf_path.exists():
             categories = unmapped.get('categories', []) or []
             compliance = unmapped.get('compliance', {}) or {}
             finding_uid = record.get('uid') or record.get('id') or ''
-            check_id = record.get('metadata', {}).get('product', {}).get('name', record.get('activity_name'))
+            meta_obj = record.get('metadata', {})
+            check_id = meta_obj.get('event_code') or meta_obj.get('product', {}).get('name') or record.get('activity_name') or ''
+            f_info = record.get('finding_info', {})
+            check_title = f_info.get('title') or record.get('message') or ''
 
             # Extract references list
             raw_refs = []
@@ -325,7 +336,7 @@ if ocsf_path.exists():
                 'id': record.get('id'),
                 'uid': finding_uid,
                 'check_id': check_id,
-                'check_title': record.get('message'),
+                'check_title': check_title,
                 'service': res_service,
                 'service_name': res_service,
                 'severity': severity,
@@ -333,7 +344,7 @@ if ocsf_path.exists():
                 'region': res_region,
                 'resource_id': res_arn,
                 'resource_name': res.get('name', res_arn),
-                'description': status_ext,
+                'description': f_info.get('desc') or status_ext,
                 'status_extended': status_ext,
                 'risk': risk_text,
                 'categories': categories,
@@ -370,7 +381,7 @@ if ocsf_path.exists():
 
             check_entry = {
                 'check_id': check_id,
-                'check_title': record.get('message'),
+                'check_title': check_title,
                 'severity': severity,
                 'status': status
             }
@@ -458,7 +469,7 @@ try:
     from src.reports.pdf_generator import generate_executive_pdf_report
     generate_executive_pdf_report(summary, findings, assets_list, output_path=target_dir / 'report.pdf')
 except Exception as pdf_err:
-    pass
+    print(f"[WARN] Executive PDF report generation failed: {pdf_err}", file=sys.stderr)
 "
 
 # STEP 5: CREATE ZIP ARCHIVE IF REQUESTED

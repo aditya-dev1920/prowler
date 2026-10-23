@@ -718,7 +718,7 @@ col_launch, col_history, col_delete, col_refresh = st.columns([2.2, 1.8, 0.5, 0.
 with col_launch:
     if not st.session_state["demo_mode"]:
         st.markdown('<div class="primary-scan-btn">', unsafe_allow_html=True)
-        if st.button("🚀 Trigger Security Posture Assessment", use_container_width=True, type="primary"):
+        if st.button("🚀 Run Security Scan", use_container_width=True, type="primary"):
             if auth_mode == "IAM Role Assume (Recommended)" and not role_arn:
                 st.error("Please provide a valid AWS IAM Role ARN in the sidebar.")
             elif auth_mode == "Direct Access Keys" and (not access_key or not secret_key):
