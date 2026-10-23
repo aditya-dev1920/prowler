@@ -29,6 +29,8 @@ EXTERNAL_ID="${EXTERNAL_ID:-}"
 ACCESS_KEY="${AWS_ACCESS_KEY_ID:-}"
 SECRET_KEY="${AWS_SECRET_ACCESS_KEY:-}"
 SESSION_TOKEN="${AWS_SESSION_TOKEN:-}"
+EXPECTED_ACCOUNT_ID="${EXPECTED_ACCOUNT_ID:-}"
+PROVIDER_ALIAS="${PROVIDER_ALIAS:-}"
 REGIONS="${DEFAULT_REGIONS:-us-east-1,ap-south-1}"
 SERVICES=""
 CHECKS=""
@@ -62,6 +64,8 @@ EOF
 # Parse CLI arguments
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
+        --account-id) EXPECTED_ACCOUNT_ID="$2"; shift 2 ;;
+        --provider-alias) PROVIDER_ALIAS="$2"; shift 2 ;;
         --role-arn) ROLE_ARN="$2"; shift 2 ;;
         --external-id) EXTERNAL_ID="$2"; shift 2 ;;
         --access-key)
@@ -94,6 +98,8 @@ PREFLIGHT_JSON=$(ROLE_ARN="$ROLE_ARN" \
   ACCESS_KEY="$ACCESS_KEY" \
   SECRET_KEY="$SECRET_KEY" \
   SESSION_TOKEN="$SESSION_TOKEN" \
+  EXPECTED_ACCOUNT_ID="$EXPECTED_ACCOUNT_ID" \
+  PROVIDER_ALIAS="$PROVIDER_ALIAS" \
   AWS_REGION="$PRIMARY_REGION" \
   "${PYTHON_BIN[@]}" -c "
 import os, sys, json, boto3
@@ -104,6 +110,8 @@ external_id = os.environ.get('EXTERNAL_ID', '').strip()
 access_key = os.environ.get('ACCESS_KEY', '').strip()
 secret_key = os.environ.get('SECRET_KEY', '').strip()
 session_token = os.environ.get('SESSION_TOKEN', '').strip()
+expected_account = os.environ.get('EXPECTED_ACCOUNT_ID', '').strip()
+provider_alias = os.environ.get('PROVIDER_ALIAS', '').strip()
 region = os.environ.get('AWS_REGION', 'us-east-1').strip()
 
 # Security Guard: Never fall back to host machine's IAM credentials in multi-tenant setup
@@ -136,7 +144,22 @@ try:
         test_client = boto3.client('sts', **sts_kwargs)
 
     identity = test_client.get_caller_identity()
-    print(json.dumps({'connected': True, 'account_id': identity.get('Account'), 'arn': identity.get('Arn')}))
+    actual_account = identity.get('Account')
+
+    # Cross-verification: If user specified an expected Account ID, verify match
+    if expected_account and expected_account != actual_account:
+        print(json.dumps({
+            'connected': False,
+            'error': f'Account ID verification failed: Expected {expected_account}, but credentials authenticate to {actual_account}'
+        }))
+        sys.exit(0)
+
+    print(json.dumps({
+        'connected': True,
+        'account_id': actual_account,
+        'arn': identity.get('Arn'),
+        'provider_alias': provider_alias
+    }))
 except Exception as e:
     print(json.dumps({'connected': False, 'error': str(e)}))
 ")
@@ -248,258 +271,16 @@ if [[ ! -f "$OCSF_FILE" && $PROWLER_EXIT_CODE -ne 0 ]]; then
     exit $PROWLER_EXIT_CODE
 fi
 
-# STEP 4: EXTRACT FINDINGS & ASSETS INVENTORY (JSON) & GENERATE PDF
-# (Uses environment variables for safety against quoting/injection)
-OCSF_FILE="$OCSF_FILE" \
-TARGET_DIR="$TARGET_DIR" \
-SCAN_ID="$SCAN_ID" \
-ACCOUNT_ID="$ACCOUNT_ID" \
-DURATION="$DURATION" \
-SCRIPT_DIR="$SCRIPT_DIR" \
-"${PYTHON_BIN[@]}" -c "
-import os, sys, json
-from pathlib import Path
+# STEP 4: EXTRACT FINDINGS, ASSETS, SUMMARY & GENERATE PDF/ZIP
+PYTHONPATH="$SCRIPT_DIR:$PYTHONPATH" "${PYTHON_BIN[@]}" -m src.reports.post_processor \
+    --target-dir "$TARGET_DIR" \
+    --scan-id "$SCAN_ID" \
+    --account-id "$ACCOUNT_ID" \
+    --provider-alias "$PROVIDER_ALIAS" \
+    --duration "$DURATION" \
+    --ocsf-file "$OCSF_FILE"
 
-script_dir = Path(os.environ.get('SCRIPT_DIR', ''))
-if str(script_dir) not in sys.path:
-    sys.path.insert(0, str(script_dir))
-
-ocsf_path = Path(os.environ.get('OCSF_FILE', ''))
-target_dir = Path(os.environ.get('TARGET_DIR', ''))
-scan_id = os.environ.get('SCAN_ID', '')
-account_id = os.environ.get('ACCOUNT_ID', '')
-duration = int(os.environ.get('DURATION', 0))
-
-findings = []
-assets_map = {}
-status_counts = {'FAIL': 0, 'PASS': 0, 'MANUAL': 0, 'MUTED': 0}
-severity_counts = {
-    'critical': {'fail': 0, 'pass': 0},
-    'high': {'fail': 0, 'pass': 0},
-    'medium': {'fail': 0, 'pass': 0},
-    'low': {'fail': 0, 'pass': 0}
-}
-services_breakdown = {}
-compliance_tracker = {}
-
-if ocsf_path.exists():
-    with open(ocsf_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except Exception:
-                continue
-
-            status = record.get('status', 'PASS').upper()
-            severity = record.get('severity', 'low').lower()
-            status_counts[status] = status_counts.get(status, 0) + 1
-            if severity in severity_counts and status in ('FAIL', 'PASS'):
-                severity_counts[severity][status.lower()] += 1
-
-            resources = record.get('resources', [])
-            res = resources[0] if resources else {}
-            res_arn = res.get('uid') or res.get('name') or 'unknown_resource'
-            res_type = res.get('type', '')
-            res_service = res_type.split('::')[-1].lower() if '::' in res_type else 'aws'
-            res_region = res.get('region', 'global')
-            status_ext = record.get('status_detail', record.get('message', ''))
-            res_labels = res.get('labels', []) or []
-
-            unmapped = record.get('unmapped', {})
-            remediation_obj = record.get('remediation', {})
-            remediation_code = remediation_obj.get('code', {}) if isinstance(remediation_obj, dict) else {}
-            cli_code = remediation_code.get('cli') or ''
-            risk_text = record.get('risk_details', '')
-            categories = unmapped.get('categories', []) or []
-            compliance = unmapped.get('compliance', {}) or {}
-            finding_uid = record.get('uid') or record.get('id') or ''
-            meta_obj = record.get('metadata', {})
-            check_id = meta_obj.get('event_code') or meta_obj.get('product', {}).get('name') or record.get('activity_name') or ''
-            f_info = record.get('finding_info', {})
-            check_title = f_info.get('title') or record.get('message') or ''
-
-            # Extract references list
-            raw_refs = []
-            if isinstance(remediation_obj, dict):
-                r_refs = remediation_obj.get('references') or []
-                raw_refs.extend(r_refs if isinstance(r_refs, list) else [r_refs])
-            u_refs = unmapped.get('references') or unmapped.get('related_url') or []
-            raw_refs.extend(u_refs if isinstance(u_refs, list) else [u_refs])
-            all_refs = [str(r) for r in raw_refs if r]
-            dedup_refs = list(dict.fromkeys(all_refs))
-
-            # 1. Finding Item (Full Prowler finding metadata)
-            finding = {
-                'id': record.get('id'),
-                'uid': finding_uid,
-                'check_id': check_id,
-                'check_title': check_title,
-                'service': res_service,
-                'service_name': res_service,
-                'severity': severity,
-                'status': status,
-                'region': res_region,
-                'resource_id': res_arn,
-                'resource_name': res.get('name', res_arn),
-                'description': f_info.get('desc') or status_ext,
-                'status_extended': status_ext,
-                'risk': risk_text,
-                'categories': categories,
-                'compliance': compliance,
-                'remediation': remediation_obj.get('desc', '') if isinstance(remediation_obj, dict) else '',
-                'remediation_url': dedup_refs[0] if dedup_refs else '',
-                'remediation_cli': cli_code,
-                'references': dedup_refs,
-                'scan_id': scan_id,
-                'timestamp': record.get('time') or record.get('timestamp') or '',
-                'tags': res_labels
-            }
-            findings.append(finding)
-
-            # 2. Asset / Resource Item (Deduplicated with child check lists)
-            if res_arn not in assets_map:
-                assets_map[res_arn] = {
-                    'resource_arn': res_arn,
-                    'resource_name': res.get('name', res_arn),
-                    'service': res_service,
-                    'service_name': res_service,
-                    'region': res_region,
-                    'status': 'secure',
-                    'critical_failures': 0,
-                    'high_failures': 0,
-                    'medium_failures': 0,
-                    'low_failures': 0,
-                    'total_checks_evaluated': 0,
-                    'failed_checks': [],
-                    'passed_checks': [],
-                    'tags': res_labels
-                }
-            assets_map[res_arn]['total_checks_evaluated'] += 1
-
-            check_entry = {
-                'check_id': check_id,
-                'check_title': check_title,
-                'severity': severity,
-                'status': status
-            }
-            if status == 'FAIL':
-                assets_map[res_arn]['status'] = 'vulnerable'
-                if severity in severity_counts:
-                    assets_map[res_arn][f'{severity}_failures'] += 1
-                assets_map[res_arn]['failed_checks'].append(check_entry)
-            elif status == 'PASS':
-                assets_map[res_arn]['passed_checks'].append(check_entry)
-
-            # 3. Services breakdown (for frontend charts)
-            if res_service not in services_breakdown:
-                services_breakdown[res_service] = {'pass': 0, 'fail': 0, 'total': 0, 'PASS': 0, 'FAIL': 0}
-            services_breakdown[res_service]['total'] += 1
-            if status in ('PASS', 'FAIL'):
-                services_breakdown[res_service][status.lower()] += 1
-                services_breakdown[res_service][status.upper()] += 1
-
-            # 4. Compliance framework tracking
-            if isinstance(compliance, dict):
-                for fw, reqs in compliance.items():
-                    if fw not in compliance_tracker:
-                        compliance_tracker[fw] = {'passed': 0, 'failed': 0, 'total': 0, 'requirements': set()}
-                    compliance_tracker[fw]['total'] += 1
-                    if status == 'PASS':
-                        compliance_tracker[fw]['passed'] += 1
-                    elif status == 'FAIL':
-                        compliance_tracker[fw]['failed'] += 1
-                    if isinstance(reqs, list):
-                        for r in reqs:
-                            compliance_tracker[fw]['requirements'].add(str(r))
-
-assets_list = list(assets_map.values())
-
-# Aggregate compliance overview metrics
-compliance_overview = {}
-for fw, stats in compliance_tracker.items():
-    tot = stats['total']
-    score = round((stats['passed'] / tot * 100), 1) if tot > 0 else 100.0
-    compliance_overview[fw] = {
-        'passed': stats['passed'],
-        'failed': stats['failed'],
-        'total': tot,
-        'score': score,
-        'requirements_count': len(stats['requirements'])
-    }
-
-total_evaluated = status_counts.get('PASS', 0) + status_counts.get('FAIL', 0)
-security_score = round((status_counts.get('PASS', 0) / total_evaluated * 100), 1) if total_evaluated > 0 else 100.0
-
-# Summary object with flattened convenience keys for frontend KPI cards
-summary = {
-    'scan_id': scan_id,
-    'account_id': account_id,
-    'security_score': security_score,
-    'duration_seconds': duration,
-    'total_findings': len(findings),
-    'passed': status_counts.get('PASS', 0),
-    'failed': status_counts.get('FAIL', 0),
-    'muted': status_counts.get('MUTED', 0),
-    'manual': status_counts.get('MANUAL', 0),
-    'critical': severity_counts['critical']['fail'],
-    'high': severity_counts['high']['fail'],
-    'medium': severity_counts['medium']['fail'],
-    'low': severity_counts['low']['fail'],
-    'status_counts': status_counts,
-    'severity_breakdown': severity_counts,
-    'services_breakdown': services_breakdown,
-    'compliance_overview': compliance_overview,
-    'total_assets_scanned': len(assets_list)
-}
-
-with open(target_dir / 'findings.json', 'w', encoding='utf-8') as f:
-    json.dump(findings, f, indent=2)
-
-with open(target_dir / 'assets.json', 'w', encoding='utf-8') as f:
-    json.dump(assets_list, f, indent=2)
-
-with open(target_dir / 'summary.json', 'w', encoding='utf-8') as f:
-    json.dump(summary, f, indent=2)
-
-# Generate Executive Security Posture PDF Report
-try:
-    from src.reports.pdf_generator import generate_executive_pdf_report
-    generate_executive_pdf_report(summary, findings, assets_list, output_path=target_dir / 'report.pdf')
-except Exception as pdf_err:
-    print(f"[WARN] Executive PDF report generation failed: {pdf_err}", file=sys.stderr)
-"
-
-# STEP 5: CREATE ZIP ARCHIVE IF REQUESTED
-ZIP_FILE=""
-if [[ "$FORMAT" == "zip" || "$FORMAT" == "all" ]]; then
-    ZIP_FILE="${TARGET_DIR}/${SCAN_ID}_bundle.zip"
-    if command -v zip &> /dev/null; then
-        (
-            cd "$TARGET_DIR"
-            zip -q -r "$(basename "$ZIP_FILE")" findings.json assets.json summary.json report.csv report.html report.pdf 2>/dev/null || \
-            zip -q -r "$(basename "$ZIP_FILE")" *.json *.csv *.html *.pdf 2>/dev/null || true
-        )
-    else
-        TARGET_DIR="$TARGET_DIR" ZIP_FILE="$ZIP_FILE" "${PYTHON_BIN[@]}" -c "
-import os, zipfile
-from pathlib import Path
-target = Path(os.environ['TARGET_DIR'])
-zip_path = Path(os.environ['ZIP_FILE'])
-files_to_pack = ['findings.json', 'assets.json', 'summary.json', 'report.csv', 'report.html', 'report.pdf']
-with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-    for f in files_to_pack:
-        fp = target / f
-        if fp.exists():
-            zf.write(fp, arcname=f)
-    for p in target.glob('*'):
-        if p.suffix in ('.json', '.csv', '.html', '.pdf') and p.name not in files_to_pack and p.name != zip_path.name:
-            zf.write(p, arcname=p.name)
-" 2>/dev/null || true
-    fi
-fi
+ZIP_FILE="${TARGET_DIR}/${SCAN_ID}_bundle.zip"
 
 
 # STEP 6: OUTPUT STRUCTURED JSON ON STDOUT

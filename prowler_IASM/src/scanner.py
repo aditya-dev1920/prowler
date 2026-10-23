@@ -58,6 +58,8 @@ class ProwlerScanner:
 
     def test_connection(
         self,
+        account_id: Optional[str] = None,
+        provider_alias: Optional[str] = None,
         role_arn: Optional[str] = None,
         external_id: Optional[str] = None,
         access_key: Optional[str] = None,
@@ -74,6 +76,10 @@ class ProwlerScanner:
         start_time = time.time()
         args = ["--test-connection-only"]
 
+        if account_id:
+            args.extend(["--account-id", account_id])
+        if provider_alias:
+            args.extend(["--provider-alias", provider_alias])
         if role_arn:
             args.extend(["--role-arn", role_arn])
         if external_id:
@@ -114,6 +120,8 @@ class ProwlerScanner:
 
     def run_scan(
         self,
+        account_id: Optional[str] = None,
+        provider_alias: Optional[str] = None,
         role_arn: Optional[str] = None,
         external_id: Optional[str] = None,
         access_key: Optional[str] = None,
@@ -139,6 +147,10 @@ class ProwlerScanner:
             "--format", "all"
         ]
 
+        if account_id:
+            args.extend(["--account-id", account_id])
+        if provider_alias:
+            args.extend(["--provider-alias", provider_alias])
         if role_arn:
             args.extend(["--role-arn", role_arn])
         if external_id:

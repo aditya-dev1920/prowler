@@ -16,10 +16,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Response, Security, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import APIKeyHeader, APIKeyQuery
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+from starlette.requests import Request
 
 from src.reports.pdf_generator import generate_executive_pdf_report, generate_compliance_pdf_report
 from src.reports.csv_generator import generate_compliance_csv
@@ -30,6 +32,12 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 logger = logging.getLogger("prowler_iasm_api")
+logger.setLevel(logging.INFO)
+# Guarantee output to stdout even when executed under Uvicorn process manager
+if not logger.handlers and not logging.getLogger().handlers:
+    _console_handler = logging.StreamHandler(sys.stdout)
+    _console_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+    logger.addHandler(_console_handler)
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 RUN_SCAN_SCRIPT = BASE_DIR / "run_scan.sh"
@@ -78,6 +86,7 @@ async def verify_api_key(
         return True
     key = header_key or query_key
     if not key or not secrets.compare_digest(key, API_KEY):
+        logger.warning("[Security] Unauthorized API access blocked: Invalid or missing API key.")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing X-API-Key authentication header or api_key query parameter."
@@ -134,6 +143,7 @@ def resolve_script_command(args: List[str]) -> List[str]:
 def sanitize_scan_id(scan_id: str) -> str:
     """Prevents directory traversal and shell injection via custom scan IDs."""
     if not re.match(r"^[a-zA-Z0-9_\-\.]+$", scan_id) or ".." in scan_id:
+        logger.warning(f"[Security] Malformed or illegal scan_id rejected: {scan_id[:32]!r}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid scan_id format. Must contain only alphanumeric characters, underscores, hyphens, or dots."
@@ -145,6 +155,7 @@ def get_scan_dir(scan_id: str) -> Path:
     clean_id = sanitize_scan_id(scan_id)
     target = (OUTPUT_DIR / clean_id).resolve()
     if not target.is_relative_to(OUTPUT_DIR):
+        logger.warning(f"[Security] Directory traversal escape attempt blocked: {clean_id!r}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Illegal directory traversal detected."
@@ -153,11 +164,14 @@ def get_scan_dir(scan_id: str) -> Path:
 
 # State Persistence & Disk Pruning
 def save_metadata(scan_id: str, data: Dict[str, Any]):
-    scan_dir = get_scan_dir(scan_id)
-    scan_dir.mkdir(parents=True, exist_ok=True)
-    meta_path = scan_dir / "metadata.json"
-    with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+    try:
+        scan_dir = get_scan_dir(scan_id)
+        scan_dir.mkdir(parents=True, exist_ok=True)
+        meta_path = scan_dir / "metadata.json"
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to persist metadata for scan [{scan_id}]: {e}")
 
 def prune_expired_scans():
     """Removes scan directories older than SCAN_RETENTION_DAYS."""
@@ -291,6 +305,18 @@ async def lifespan(app: FastAPI):
     auth_mode = "API Key Enforced" if API_KEY else "Open Access (No API Key configured)"
     logger.info(f"Loaded {len(SCAN_REGISTRY)} scans from disk. Max concurrent scans: {MAX_CONCURRENT_SCANS}. Auth: {auth_mode}")
     yield
+    logger.info("Shutting down Prowler IASM Microservice...")
+    for s_id, proc in list(ACTIVE_PROCESSES.items()):
+        logger.info(f"Terminating active scan process [{s_id}] during server shutdown...")
+        terminate_process_tree(proc)
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        if s_id in SCAN_REGISTRY and SCAN_REGISTRY[s_id].get("status") in ("running", "queued"):
+            SCAN_REGISTRY[s_id]["status"] = "failed"
+            SCAN_REGISTRY[s_id]["error_message"] = "Scan interrupted by server shutdown."
+            save_metadata(s_id, SCAN_REGISTRY[s_id])
 
 # FastAPI App Initialization & Compliant CORS
 app = FastAPI(
@@ -318,8 +344,46 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Global Exception Handlers for Robust Observability & Sanitized Error Propagation
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Logs detailed schema validation errors without leaking credentials."""
+    errors = exc.errors()
+    sanitized_errors = []
+    for err in errors:
+        loc = err.get("loc", ())
+        field = str(loc[-1]) if loc else "unknown"
+        sanitized_errors.append({
+            "field": field,
+            "message": err.get("msg"),
+            "type": err.get("type")
+        })
+    logger.warning(
+        f"[Request-Validation-Failed] {request.method} {request.url.path} - Issues: {sanitized_errors}"
+    )
+    sys.stdout.flush()
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={"detail": errors}
+    )
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Catches unexpected exceptions, logs traceback, and returns a safe 500."""
+    logger.error(
+        f"[Internal-Server-Error] {request.method} {request.url.path} - Exception: {exc}",
+        exc_info=True
+    )
+    sys.stdout.flush()
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"detail": "An unexpected internal server error occurred."}
+    )
+
 # Data Models (Pydantic)
 class TestConnectionRequest(BaseModel):
+    account_id: Optional[str] = Field(None, description="12-digit AWS Account ID (Required when connecting via Direct Access Keys)")
+    provider_alias: Optional[str] = Field(None, description="Human-readable provider alias e.g. 'Production AWS'")
     role_arn: Optional[str] = Field(None, description="AWS IAM Role ARN (AssumeRole mode)")
     external_id: Optional[str] = Field(None, description="External ID for AssumeRole")
     access_key: Optional[str] = Field(None, description="AWS Access Key ID")
@@ -327,15 +391,28 @@ class TestConnectionRequest(BaseModel):
     session_token: Optional[str] = Field(None, description="Optional AWS Session Token")
     region: Optional[str] = Field("us-east-1", description="Primary AWS region to verify against")
 
+    @model_validator(mode="after")
+    def validate_account_id(self):
+        if self.access_key and self.secret_key and not self.account_id:
+            raise ValueError("AWS Account ID ('account_id') is required when connecting via direct access keys.")
+        if self.account_id:
+            c = self.account_id.strip()
+            if not c.isdigit() or len(c) != 12:
+                raise ValueError("AWS Account ID ('account_id') must be a 12-digit numeric string (e.g. '123456789012').")
+        return self
+
 class TestConnectionResponse(BaseModel):
     status: str
     account: Optional[str] = None
+    provider_alias: Optional[str] = None
     arn: Optional[str] = None
     mode: Optional[str] = None
     message: Optional[str] = None
     duration_ms: float
 
 class ScanRequest(BaseModel):
+    account_id: Optional[str] = Field(None, description="Target 12-digit AWS Account ID (Required when connecting via Direct Access Keys)")
+    provider_alias: Optional[str] = Field(None, description="Human-readable provider alias e.g. 'Production AWS'")
     role_arn: Optional[str] = Field(None, description="IAM Role ARN to assume")
     external_id: Optional[str] = Field(None, description="External ID for AssumeRole")
     access_key: Optional[str] = Field(None, description="AWS Access Key ID")
@@ -345,6 +422,16 @@ class ScanRequest(BaseModel):
     services: Optional[List[str]] = Field(None, description="Specific AWS services (e.g. s3, iam, ec2)")
     checks: Optional[List[str]] = Field(None, description="Specific check IDs to execute")
     scan_id: Optional[str] = Field(None, description="Optional custom scan ID (UUID generated if omitted)")
+
+    @model_validator(mode="after")
+    def validate_account_id(self):
+        if self.access_key and self.secret_key and not self.account_id:
+            raise ValueError("AWS Account ID ('account_id') is required when connecting via direct access keys.")
+        if self.account_id:
+            c = self.account_id.strip()
+            if not c.isdigit() or len(c) != 12:
+                raise ValueError("AWS Account ID ('account_id') must be a 12-digit numeric string (e.g. '123456789012').")
+        return self
 
 class ScanLaunchResponse(BaseModel):
     scan_id: str
@@ -367,11 +454,15 @@ class ScanStatusResponse(BaseModel):
 # Background Scan Execution Task
 async def execute_prowler_scan(scan_id: str, req: ScanRequest):
     async with SCAN_SEMAPHORE:
+        meta = SCAN_REGISTRY.get(scan_id, {})
+        if meta.get("status") == "cancelled":
+            logger.info(f"Scan [{scan_id}] was cancelled while queued. Skipping execution.")
+            return
+
         scan_dir = get_scan_dir(scan_id)
         scan_dir.mkdir(parents=True, exist_ok=True)
         log_file = scan_dir / "execution.log"
 
-        meta = SCAN_REGISTRY.get(scan_id, {})
         meta["status"] = "running"
         meta["started_at"] = datetime.now(timezone.utc).isoformat()
         save_metadata(scan_id, meta)
@@ -396,6 +487,10 @@ async def execute_prowler_scan(scan_id: str, req: ScanRequest):
             args.extend(["--services", ",".join(req.services)])
         if req.checks:
             args.extend(["--checks", ",".join(req.checks)])
+        if req.account_id:
+            args.extend(["--account-id", req.account_id])
+        if req.provider_alias:
+            args.extend(["--provider-alias", req.provider_alias])
 
         cmd = resolve_script_command(args)
 
@@ -407,6 +502,10 @@ async def execute_prowler_scan(scan_id: str, req: ScanRequest):
             sub_env["AWS_SECRET_ACCESS_KEY"] = req.secret_key
         if req.session_token:
             sub_env["AWS_SESSION_TOKEN"] = req.session_token
+        if req.account_id:
+            sub_env["EXPECTED_ACCOUNT_ID"] = req.account_id
+        if req.provider_alias:
+            sub_env["PROVIDER_ALIAS"] = req.provider_alias
 
         spawn_kwargs = get_subprocess_spawn_kwargs()
 
@@ -540,6 +639,15 @@ async def test_connection(req: TestConnectionRequest):
     Credentials are encrypted in the environment dictionary and never exposed in process args.
     """
     start_time = time.time()
+    target_info = f"account [{req.account_id or 'auto-discover'}]"
+    if req.role_arn:
+        target_info = f"role [{req.role_arn}] (account: {req.account_id or 'auto-discover'})"
+    if req.provider_alias:
+        target_info += f" alias [{req.provider_alias}]"
+
+    logger.info(f"[Test-Connection] Verifying AWS credentials for {target_info} in region [{req.region or 'us-east-1'}]...")
+    sys.stdout.flush()
+
     args = ["--test-connection-only"]
 
     if req.role_arn:
@@ -548,6 +656,10 @@ async def test_connection(req: TestConnectionRequest):
         args.extend(["--external-id", req.external_id])
     if req.region:
         args.extend(["--regions", req.region])
+    if req.account_id:
+        args.extend(["--account-id", req.account_id])
+    if req.provider_alias:
+        args.extend(["--provider-alias", req.provider_alias])
 
     cmd = resolve_script_command(args)
 
@@ -558,43 +670,88 @@ async def test_connection(req: TestConnectionRequest):
         sub_env["AWS_SECRET_ACCESS_KEY"] = req.secret_key
     if req.session_token:
         sub_env["AWS_SESSION_TOKEN"] = req.session_token
+    if req.account_id:
+        sub_env["EXPECTED_ACCOUNT_ID"] = req.account_id
+    if req.provider_alias:
+        sub_env["PROVIDER_ALIAS"] = req.provider_alias
 
     spawn_kwargs = get_subprocess_spawn_kwargs()
 
-    process = await asyncio.create_subprocess_exec(
-        *cmd,
-        env=sub_env,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        **spawn_kwargs
-    )
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            env=sub_env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            **spawn_kwargs
+        )
+    except Exception as exc:
+        duration_ms = round((time.time() - start_time) * 1000, 2)
+        logger.error(f"[Test-Connection] Failed to launch verification process for {target_info}: {exc}")
+        sys.stdout.flush()
+        return TestConnectionResponse(
+            status="error",
+            message=f"Failed to launch verification process: {exc}",
+            duration_ms=duration_ms
+        )
     try:
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=15.0)
     except asyncio.TimeoutError:
         kill_process_tree(process)
+        duration_ms = round((time.time() - start_time) * 1000, 2)
+        err_msg = "Connection verification timed out after 15 seconds."
+        logger.error(f"[Test-Connection] TIMEOUT ({duration_ms}ms) for {target_info}")
+        sys.stdout.flush()
         return TestConnectionResponse(
             status="error",
-            message="Connection verification timed out after 15 seconds.",
-            duration_ms=round((time.time() - start_time) * 1000, 2)
+            message=err_msg,
+            duration_ms=duration_ms
         )
 
     duration_ms = round((time.time() - start_time) * 1000, 2)
     output_str = stdout.decode("utf-8").strip()
+    stderr_str = stderr.decode("utf-8").strip()
+
+    if stderr_str:
+        logger.warning(f"[Test-Connection] Subprocess stderr: {stderr_str}")
 
     try:
         data = json.loads(output_str) if output_str else {}
     except Exception:
         data = {
             "status": "error",
-            "message": stderr.decode("utf-8").strip() or output_str or "STS validation failed"
+            "message": stderr_str or output_str or "STS validation failed"
         }
 
+    raw_msg = data.get("message")
+    raw_err = data.get("error")
+
+    # Combine message and error so client and backend logs see the exact AWS STS / policy failure
+    if raw_err and raw_msg and raw_err != raw_msg:
+        combined_msg = f"{raw_msg}: {raw_err}"
+    else:
+        combined_msg = raw_msg or raw_err or "STS validation failed"
+
+    status_val = data.get("status", "error")
+    if status_val in ("success", "connected"):
+        account_id_val = data.get("account_id") or data.get("account") or req.account_id
+        arn_val = data.get("arn")
+        logger.info(
+            f"[Test-Connection] SUCCESS ({duration_ms}ms) - Verified Account: [{account_id_val}], ARN: [{arn_val}]"
+        )
+    else:
+        logger.error(
+            f"[Test-Connection] FAILED ({duration_ms}ms) - {target_info}: {combined_msg}"
+        )
+    sys.stdout.flush()
+
     return TestConnectionResponse(
-        status=data.get("status", "error"),
+        status=status_val,
         account=data.get("account_id") or data.get("account"),
+        provider_alias=data.get("provider_alias") or req.provider_alias,
         arn=data.get("arn"),
         mode=data.get("mode"),
-        message=data.get("message") or data.get("error"),
+        message=combined_msg,
         duration_ms=duration_ms
     )
 
@@ -624,6 +781,8 @@ async def trigger_scan(req: ScanRequest, background_tasks: BackgroundTasks):
     meta = {
         "scan_id": scan_id,
         "status": "queued",
+        "account_id": req.account_id,
+        "provider_alias": req.provider_alias,
         "created_at": now_iso,
         "started_at": None,
         "completed_at": None,
@@ -637,6 +796,15 @@ async def trigger_scan(req: ScanRequest, background_tasks: BackgroundTasks):
 
     SCAN_REGISTRY[scan_id] = meta
     save_metadata(scan_id, meta)
+
+    target_info = f"account [{req.account_id or 'auto-discover'}]"
+    if req.role_arn:
+        target_info = f"role [{req.role_arn}] (account: {req.account_id or 'auto-discover'})"
+    if req.provider_alias:
+        target_info += f" alias [{req.provider_alias}]"
+
+    logger.info(f"Scan [{scan_id}] requested and enqueued for {target_info} (Regions: {req.regions or 'default'}).")
+    sys.stdout.flush()
 
     # Dispatch to background task worker
     background_tasks.add_task(execute_prowler_scan, scan_id, req)
@@ -657,6 +825,7 @@ async def trigger_scan(req: ScanRequest, background_tasks: BackgroundTasks):
 async def cancel_scan(scan_id: str):
     """Cancels an actively running or queued scan and terminates its process tree."""
     sanitize_scan_id(scan_id)
+    logger.info(f"Cancellation requested for scan [{scan_id}].")
     proc = ACTIVE_PROCESSES.get(scan_id)
     if proc:
         terminate_process_tree(proc)
@@ -672,8 +841,10 @@ async def cancel_scan(scan_id: str):
         meta["error_message"] = "Scan was cancelled by user request."
         meta["completed_at"] = datetime.now(timezone.utc).isoformat()
         save_metadata(scan_id, meta)
+        logger.info(f"Scan [{scan_id}] successfully cancelled and state persisted.")
         return {"status": "success", "message": f"Scan '{scan_id}' cancelled successfully."}
 
+    logger.warning(f"Cancellation requested for non-existent scan [{scan_id}].")
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Active scan '{scan_id}' not found.")
 
 # Scan Result Retrieval Endpoint (Status)
@@ -736,13 +907,13 @@ def get_scan_logs(
     current_check = None
     for line in reversed(lines):
         if not current_service:
-            svc_match = re.search(r"(?:Scanning\s+service|Scanning|service)[:\s]+([a-zA-Z0-9_\-]+)", line, re.IGNORECASE)
+            svc_match = re.search(r"(?:Scanning\s+service|Scanning|service)[:\s]+([a-zA-Z0-9_\-]+)|-\s+([a-zA-Z0-9_\-]+)\s+\[", line, re.IGNORECASE)
             if svc_match:
-                candidate = svc_match.group(1).upper()
+                candidate = (svc_match.group(1) or svc_match.group(2)).upper()
                 if candidate not in ("SERVICE", "ACCOUNT", "AWS"):
                     current_service = candidate
         if not current_check:
-            chk_match = re.search(r"(?:Executing check|Check)[:\s]+([a-zA-Z0-9_\-]+)", line, re.IGNORECASE)
+            chk_match = re.search(r"(?:Executing check|Check\s+ID|Check)[:\s]+([a-zA-Z0-9_\-]+)", line, re.IGNORECASE)
             if chk_match:
                 current_check = chk_match.group(1)
         if current_service and current_check:
@@ -786,6 +957,12 @@ def get_scan_summary(scan_id: str):
             status_code=status.HTTP_409_CONFLICT,
             detail="Summary report is currently being written. Please retry."
         )
+    except Exception as e:
+        logger.error(f"Failed to read summary report for scan [{scan_id}]: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to read summary report."
+        )
 
 # Scan Result Retrieval Endpoint (Findings & Assets)
 @app.get(
@@ -799,7 +976,7 @@ def get_scan_findings(
     severity_filter: Optional[str] = Query(None, alias="severity", description="Filter by critical, high, medium, low"),
     service_filter: Optional[str] = Query(None, alias="service", description="Filter by AWS service (e.g. s3, iam)"),
     search: Optional[str] = Query(None, description="Free text search in check title or resource"),
-    limit: int = Query(50, ge=1, le=500, description="Page limit"),
+    limit: int = Query(50, ge=1, le=50000, description="Page limit"),
     offset: int = Query(0, ge=0, description="Page offset")
 ):
     """Returns paginated, filterable security findings directly for UI tables."""
@@ -866,7 +1043,7 @@ def get_scan_assets(
     scan_id: str,
     service_filter: Optional[str] = Query(None, alias="service"),
     region_filter: Optional[str] = Query(None, alias="region"),
-    limit: int = Query(50, ge=1, le=500),
+    limit: int = Query(50, ge=1, le=50000),
     offset: int = Query(0, ge=0)
 ):
     """Returns discovered cloud asset inventory for IASM visibility."""
@@ -1026,6 +1203,16 @@ def view_pdf_report(scan_id: str):
 def download_compliance_csv(scan_id: str, framework_name: str):
     """Generates and downloads a framework-specific CSV report (e.g. CIS, PCI-DSS, NIST)."""
     scan_dir = get_scan_dir(scan_id)
+    safe_fw = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', framework_name)
+    cached_csv = scan_dir / f"compliance_{safe_fw}.csv"
+
+    if cached_csv.exists():
+        return FileResponse(
+            path=str(cached_csv),
+            media_type="text/csv",
+            filename=f"prowler_{scan_id}_{safe_fw}.csv"
+        )
+
     findings_path = scan_dir / "findings.json"
     if not findings_path.exists():
         raise HTTPException(
@@ -1037,11 +1224,12 @@ def download_compliance_csv(scan_id: str, framework_name: str):
         findings_data = load_cached_findings(scan_id, findings_path)
         csv_buf = generate_compliance_csv(findings_data, framework_name)
         csv_bytes = csv_buf.getvalue().encode("utf-8")
-        safe_fw = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', framework_name)
-        return Response(
-            content=csv_bytes,
+        with open(cached_csv, "wb") as f:
+            f.write(csv_bytes)
+        return FileResponse(
+            path=str(cached_csv),
             media_type="text/csv",
-            headers={"Content-Disposition": f'attachment; filename="prowler_{scan_id}_{safe_fw}.csv"'}
+            filename=f"prowler_{scan_id}_{safe_fw}.csv"
         )
     except Exception as e:
         logger.error(f"Failed to generate compliance CSV for {scan_id} / {framework_name}: {e}")
@@ -1059,6 +1247,16 @@ def download_compliance_csv(scan_id: str, framework_name: str):
 def download_compliance_pdf(scan_id: str, framework_name: str):
     """Generates and downloads a framework-specific PDF audit report (e.g. CIS, PCI-DSS, NIST)."""
     scan_dir = get_scan_dir(scan_id)
+    safe_fw = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', framework_name)
+    cached_pdf = scan_dir / f"compliance_{safe_fw}.pdf"
+
+    if cached_pdf.exists():
+        return FileResponse(
+            path=str(cached_pdf),
+            media_type="application/pdf",
+            filename=f"prowler_{scan_id}_{safe_fw}_report.pdf"
+        )
+
     summary_path = scan_dir / "summary.json"
     findings_path = scan_dir / "findings.json"
 
@@ -1074,11 +1272,13 @@ def download_compliance_pdf(scan_id: str, framework_name: str):
         findings_data = load_cached_findings(scan_id, findings_path)
 
         pdf_buf = generate_compliance_pdf_report(framework_name, summary_data, findings_data)
-        safe_fw = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', framework_name)
-        return Response(
-            content=pdf_buf.getvalue(),
+        pdf_bytes = pdf_buf.getvalue()
+        with open(cached_pdf, "wb") as f:
+            f.write(pdf_bytes)
+        return FileResponse(
+            path=str(cached_pdf),
             media_type="application/pdf",
-            headers={"Content-Disposition": f'inline; filename="prowler_{scan_id}_{safe_fw}_report.pdf"'}
+            filename=f"prowler_{scan_id}_{safe_fw}_report.pdf"
         )
     except Exception as e:
         logger.error(f"Failed to generate compliance PDF for {scan_id} / {framework_name}: {e}")
@@ -1112,6 +1312,7 @@ def list_scans():
 async def delete_scan(scan_id: str):
     """Deletes a scan, terminates any active execution, and frees all associated memory and disk space."""
     sanitize_scan_id(scan_id)
+    logger.info(f"Deletion requested for scan [{scan_id}].")
 
     proc = ACTIVE_PROCESSES.get(scan_id)
     if proc:
@@ -1128,10 +1329,16 @@ async def delete_scan(scan_id: str):
 
     scan_dir = get_scan_dir(scan_id)
     if scan_dir.exists():
-        shutil.rmtree(scan_dir, ignore_errors=True)
+        try:
+            shutil.rmtree(scan_dir, ignore_errors=True)
+        except Exception as e:
+            logger.warning(f"Error purging disk directory for scan [{scan_id}]: {e}")
 
     if scan_id in SCAN_REGISTRY:
         del SCAN_REGISTRY[scan_id]
+        logger.info(f"Scan [{scan_id}] purged from memory and disk.")
+        return {"status": "success", "message": f"Scan '{scan_id}' deleted successfully."}
 
-    return {"status": "success", "message": f"Scan '{scan_id}' deleted successfully."}
+    logger.warning(f"Deletion requested for non-existent scan [{scan_id}].")
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Scan '{scan_id}' not found.")
 

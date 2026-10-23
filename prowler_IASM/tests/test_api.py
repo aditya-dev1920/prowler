@@ -6,7 +6,7 @@ import json
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -244,6 +244,8 @@ class TestScanLifecycleAndArtifacts:
             "regions": ["us-east-1"],
             "role_arn": "arn:aws:iam::123456789012:role/SecurityAuditRole",
             "external_id": "test-ext-id",
+            "account_id": "123456789012",
+            "provider_alias": "Production AWS Core",
         }
         with patch("src.api.api.execute_prowler_scan") as mock_exec:
             res = client.post("/api/v1/scans/run", json=payload)
@@ -252,6 +254,68 @@ class TestScanLifecycleAndArtifacts:
             assert "scan_id" in data
             assert data["status"] == "queued"
             assert data["scan_id"] in SCAN_REGISTRY
+            assert SCAN_REGISTRY[data["scan_id"]]["account_id"] == "123456789012"
+            assert SCAN_REGISTRY[data["scan_id"]]["provider_alias"] == "Production AWS Core"
+
+    def test_test_connection_success(self, client: TestClient):
+        payload = {
+            "account_id": "123456789012",
+            "role_arn": "arn:aws:iam::123456789012:role/AuditRole",
+            "region": "us-east-1"
+        }
+        mock_proc = MagicMock()
+        mock_proc.communicate = AsyncMock(return_value=(
+            json.dumps({"status": "connected", "account_id": "123456789012", "arn": "arn:aws:sts::123456789012:assumed-role/AuditRole/session"}).encode("utf-8"),
+            b""
+        ))
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            res = client.post("/api/v1/scans/test-connection", json=payload)
+            assert res.status_code == 200
+            data = res.json()
+            assert data["status"] == "connected"
+            assert data["account"] == "123456789012"
+            assert "AuditRole" in data["arn"]
+
+    def test_test_connection_failure_combines_error(self, client: TestClient):
+        payload = {
+            "account_id": "123456789012",
+            "access_key": "AKIAINVALIDKEY123",
+            "secret_key": "INVALIDSECRETKEY123456789",
+            "region": "us-east-1"
+        }
+        mock_proc = MagicMock()
+        mock_proc.communicate = AsyncMock(return_value=(
+            json.dumps({
+                "status": "not_configured",
+                "message": "AWS account not configured or credentials invalid",
+                "error": "An error occurred (InvalidClientTokenId) when calling the GetCallerIdentity operation: The security token included in the request is invalid."
+            }).encode("utf-8"),
+            b""
+        ))
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            res = client.post("/api/v1/scans/test-connection", json=payload)
+            assert res.status_code == 200
+            data = res.json()
+            assert data["status"] == "not_configured"
+            # Verify error message contains both the generic msg AND the specific STS error
+            assert "AWS account not configured or credentials invalid" in data["message"]
+            assert "InvalidClientTokenId" in data["message"]
+
+    def test_test_connection_timeout(self, client: TestClient):
+        payload = {
+            "account_id": "123456789012",
+            "role_arn": "arn:aws:iam::123456789012:role/AuditRole",
+            "region": "us-east-1"
+        }
+        mock_proc = MagicMock()
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            with patch("asyncio.wait_for", side_effect=__import__("asyncio").TimeoutError()):
+                with patch("src.api.api.kill_process_tree"):
+                    res = client.post("/api/v1/scans/test-connection", json=payload)
+                    assert res.status_code == 200
+                    data = res.json()
+                    assert data["status"] == "error"
+                    assert "timed out after 15 seconds" in data["message"]
 
     def test_findings_and_assets_caching(self, client: TestClient, mock_scan_artifacts: dict):
         scan_id = mock_scan_artifacts["scan_id"]
@@ -309,17 +373,17 @@ class TestScanLifecycleAndArtifacts:
         assert data["current_check"] == "s3_bucket_default_encryption"
         assert len(data["lines"]) == 2
 
-        # 2. Test in-memory ring buffer (RAM priority)
+        # 2. Test in-memory ring buffer (RAM priority with Prowler v5 format)
         from collections import deque
         SCAN_LOGS_BUFFER[scan_id] = deque([
-            "[INFO] Scanning service: iam\n",
-            "[INFO] Executing check iam_root_mfa_enabled\n"
+            "Check ID: s3_bucket_default_encryption - s3 [HIGH]\n",
+            "\tFAIL us-east-1: S3 Bucket test has no encryption.\n"
         ])
         res_mem = client.get(f"/api/v1/scans/{scan_id}/logs?tail=10")
         assert res_mem.status_code == 200
         data_mem = res_mem.json()
-        assert data_mem["current_service"] == "IAM"
-        assert data_mem["current_check"] == "iam_root_mfa_enabled"
+        assert data_mem["current_service"] == "S3"
+        assert data_mem["current_check"] == "s3_bucket_default_encryption"
 
 
 class TestRetentionPruner:

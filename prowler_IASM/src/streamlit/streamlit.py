@@ -13,7 +13,7 @@ import streamlit as st
 
 # 1. Page Configuration & Custom Theme
 st.set_page_config(
-    page_title="Nopal IASM - Cloud Security Posture Management",
+    page_title="Nopal Security Audit Dashboard",
     page_icon="🛡️",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -582,10 +582,10 @@ def fetch_scan_dataset(url: str, scan_id: str, api_key: str = "") -> Tuple[Optio
         s_res = requests.get(f"{url}/api/v1/scans/{scan_id}/summary", headers=headers, timeout=5)
         if s_res.status_code == 200:
             summary = s_res.json()
-        f_res = requests.get(f"{url}/api/v1/scans/{scan_id}/findings?limit=500", headers=headers, timeout=8)
+        f_res = requests.get(f"{url}/api/v1/scans/{scan_id}/findings?limit=10000", headers=headers, timeout=20)
         if f_res.status_code == 200:
             findings = f_res.json().get("findings", [])
-        a_res = requests.get(f"{url}/api/v1/scans/{scan_id}/assets?limit=500", headers=headers, timeout=8)
+        a_res = requests.get(f"{url}/api/v1/scans/{scan_id}/assets?limit=10000", headers=headers, timeout=20)
         if a_res.status_code == 200:
             assets = a_res.json().get("assets", [])
     except Exception:
@@ -632,14 +632,19 @@ with st.sidebar:
     access_key = ""
     secret_key = ""
     session_token = ""
+    account_id = ""
+    provider_alias = ""
 
     if auth_mode == "IAM Role Assume (Recommended)":
-        role_arn = st.text_input("Role ARN", placeholder="arn:aws:iam::123456789012:role/ProwlerIASMScanRole")
+        role_arn = st.text_input("Role ARN*", placeholder="arn:aws:iam::123456789012:role/ProwlerIASMScanRole")
         external_id = st.text_input("External ID (Optional)", placeholder="enterprise-client-id")
+        provider_alias = st.text_input("Provider alias (optional)", placeholder="e.g. Production AWS")
     else:
-        access_key = st.text_input("AWS Access Key ID", type="password")
-        secret_key = st.text_input("AWS Secret Access Key", type="password")
-        session_token = st.text_input("AWS Session Token (Optional)", type="password")
+        account_id = st.text_input("AWS Account ID*", placeholder="e.g. 123456789012", help="Required 12-digit AWS Account ID to authenticate and scan.")
+        provider_alias = st.text_input("Provider alias (optional)", placeholder="Enter the provider alias", help="Human-readable label for dashboard and reports.")
+        access_key = st.text_input("AWS Access Key ID*", type="password", placeholder="Enter the AWS Access Key ID")
+        secret_key = st.text_input("AWS Secret Access Key*", type="password", placeholder="Enter the AWS Secret Access Key")
+        session_token = st.text_input("AWS Session Token (Optional)", type="password", placeholder="Enter the AWS Session Token")
 
     st.markdown("#### 2. Scan Scope")
     selected_regions = st.multiselect(
@@ -650,34 +655,45 @@ with st.sidebar:
 
     # Connection Test Action
     st.markdown("<div style='height: 6px;'></div>", unsafe_allow_html=True)
-    if st.button("🔌 Verify STS Connection (< 500ms)", use_container_width=True):
-        test_payload = {
-            "role_arn": role_arn or None,
-            "external_id": external_id or None,
-            "access_key": access_key or None,
-            "secret_key": secret_key or None,
-            "session_token": session_token or None,
-            "region": selected_regions[0] if selected_regions else "us-east-1"
-        }
-        with st.spinner("Executing AWS STS GetCallerIdentity..."):
-            try:
-                res = requests.post(
-                    f"{current_api_url}/api/v1/scans/test-connection",
-                    json=test_payload,
-                    headers=get_auth_headers(current_api_key),
-                    timeout=10
-                )
-                if res.status_code == 200:
-                    data = res.json()
-                    if data.get("status") in ("success", "connected"):
-                        st.success(f"✅ Verified! Account: `{data.get('account')}`")
-                        st.caption(f"⚡ Latency: **{data.get('duration_ms')} ms** | Mode: `{data.get('mode', 'sts')}`")
+    if st.button("🔌 Verify Credentials", use_container_width=True):
+        if auth_mode == "IAM Role Assume (Recommended)" and not role_arn:
+            st.error("Please enter the IAM Role ARN.")
+        elif auth_mode == "Direct Access Keys" and not account_id:
+            st.error("Please enter the 12-digit AWS Account ID.")
+        elif auth_mode == "Direct Access Keys" and (not account_id.strip().isdigit() or len(account_id.strip()) != 12):
+            st.error("AWS Account ID must be a 12-digit numeric string (e.g. 123456789012).")
+        elif auth_mode == "Direct Access Keys" and (not access_key or not secret_key):
+            st.error("Please enter both AWS Access Key ID and Secret Access Key.")
+        else:
+            test_payload = {
+                "account_id": account_id.strip() if account_id else None,
+                "provider_alias": provider_alias.strip() if provider_alias else None,
+                "role_arn": role_arn.strip() if role_arn else None,
+                "external_id": external_id.strip() if external_id else None,
+                "access_key": access_key.strip() if access_key else None,
+                "secret_key": secret_key.strip() if secret_key else None,
+                "session_token": session_token.strip() if session_token else None,
+                "region": selected_regions[0] if selected_regions else "us-east-1"
+            }
+            with st.spinner("Executing AWS STS GetCallerIdentity..."):
+                try:
+                    res = requests.post(
+                        f"{current_api_url}/api/v1/scans/test-connection",
+                        json=test_payload,
+                        headers=get_auth_headers(current_api_key),
+                        timeout=10
+                    )
+                    if res.status_code == 200:
+                        data = res.json()
+                        if data.get("status") in ("success", "connected"):
+                            st.success(f"✅ Verified! Account: `{data.get('account')}`")
+                            st.caption(f"⚡ Latency: **{data.get('duration_ms')} ms** | Mode: `{data.get('mode', 'sts')}`")
+                        else:
+                            st.error(f"❌ Connection Failed: {data.get('message')}")
                     else:
-                        st.error(f"❌ Connection Failed: {data.get('message')}")
-                else:
-                    st.error(f"HTTP {res.status_code}: {res.text}")
-            except Exception as e:
-                st.error(f"Connection Error: {e}")
+                        st.error(f"HTTP {res.status_code}: {res.text}")
+                except Exception as e:
+                    st.error(f"Connection Error: {e}")
 
     # Demo Mode Switch (Bottom of Sidebar)
     st.markdown("---")
@@ -721,10 +737,16 @@ with col_launch:
         if st.button("🚀 Run Security Scan", use_container_width=True, type="primary"):
             if auth_mode == "IAM Role Assume (Recommended)" and not role_arn:
                 st.error("Please provide a valid AWS IAM Role ARN in the sidebar.")
+            elif auth_mode == "Direct Access Keys" and not account_id:
+                st.error("Please provide the 12-digit AWS Account ID in the sidebar.")
+            elif auth_mode == "Direct Access Keys" and (not account_id.strip().isdigit() or len(account_id.strip()) != 12):
+                st.error("AWS Account ID must be a 12-digit numeric string (e.g. 123456789012).")
             elif auth_mode == "Direct Access Keys" and (not access_key or not secret_key):
                 st.error("Please provide AWS Access Key ID and Secret Access Key.")
             else:
                 scan_payload = {
+                    "account_id": account_id or None,
+                    "provider_alias": provider_alias or None,
                     "role_arn": role_arn or None,
                     "external_id": external_id or None,
                     "access_key": access_key or None,
@@ -806,9 +828,28 @@ if st.session_state.get("is_scanning") and st.session_state.get("active_scan_id"
     scan_id = st.session_state["active_scan_id"]
 
     monitor_placeholder = st.empty()
+    cancel_placeholder = st.empty()
     terminal_expander = st.expander("🖥️ Live Execution Terminal (Streaming from Prowler Engine)", expanded=True)
     with terminal_expander:
         terminal_placeholder = st.empty()
+
+    # Cancel button rendered ONCE outside the polling loop to prevent StreamlitDuplicateElementId
+    with cancel_placeholder.container():
+        cancel_col, _ = st.columns([1, 4])
+        with cancel_col:
+            if st.button("⏹️ Cancel Active Scan", key=f"btn_cancel_{scan_id}", type="secondary", use_container_width=True):
+                try:
+                    requests.post(
+                        f"{current_api_url}/api/v1/scans/{scan_id}/cancel",
+                        headers=get_auth_headers(current_api_key),
+                        timeout=5
+                    )
+                except Exception:
+                    pass
+                st.session_state["is_scanning"] = False
+                cancel_placeholder.empty()
+                st.warning("Scan cancellation requested.")
+                st.rerun()
 
     start_time = time.time()
     step_definitions = [
@@ -888,48 +929,27 @@ if st.session_state.get("is_scanning") and st.session_state.get("active_scan_id"
             stage_pills_html.append(f'<span class="{pill_cls}">{icon} {stage_label}</span>')
         pills_markup = " ".join(stage_pills_html)
 
-        # 4. Render main monitor card
+        # 4. Render main monitor card (compact HTML without leading markdown indentation)
         service_badge = f'<span style="background: rgba(56, 189, 248, 0.2); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.4); padding: 3px 8px; border-radius: 6px; font-weight: 600; font-size: 0.8rem; margin-left: 8px;">TARGET: {current_service}</span>' if current_service else ""
         check_desc = f"Evaluating check: <code>{current_check}</code>" if current_check else "Discovering services and evaluating IAM/CIS compliance rules..."
 
-        with monitor_placeholder.container():
-            st.markdown(f"""
-            <div class="scan-monitor-box">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-                    <div style="display: flex; align-items: center; gap: 10px;">
-                        <span class="status-badge status-online">
-                            <span class="pulse-dot"></span> SCAN IN PROGRESS
-                        </span>
-                        <span style="font-size: 0.85rem; color: #94a3b8; font-weight: 500;">
-                            ID: <strong style="color: #f1f5f9;">{scan_id}</strong>
-                        </span>
-                        {service_badge}
-                    </div>
-                    <div style="font-size: 0.9rem; font-weight: 600; color: #38bdf8; font-family: monospace;">
-                        ⏱️ {timer_str}
-                    </div>
-                </div>
-                <div style="margin: 10px 0 14px 0;">
-                    {pills_markup}
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-            st.progress(progress_pct / 100.0, text=f"Step {active_stage}/4: {check_desc}")
+        monitor_html = (
+            f'<div class="scan-monitor-box">'
+            f'<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">'
+            f'<div style="display: flex; align-items: center; gap: 10px;">'
+            f'<span class="status-badge status-online"><span class="pulse-dot"></span> SCAN IN PROGRESS</span>'
+            f'<span style="font-size: 0.85rem; color: #94a3b8; font-weight: 500;">ID: <strong style="color: #f1f5f9;">{scan_id}</strong></span>'
+            f'{service_badge}'
+            f'</div>'
+            f'<div style="font-size: 0.9rem; font-weight: 600; color: #38bdf8; font-family: monospace;">⏱️ {timer_str}</div>'
+            f'</div>'
+            f'<div style="margin: 10px 0 14px 0;">{pills_markup}</div>'
+            f'</div>'
+        )
 
-            cancel_col, _ = st.columns([1, 4])
-            with cancel_col:
-                if st.button("⏹️ Cancel Active Scan", type="secondary", use_container_width=True):
-                    try:
-                        requests.post(
-                            f"{current_api_url}/api/v1/scans/{scan_id}/cancel",
-                            headers=get_auth_headers(current_api_key),
-                            timeout=5
-                        )
-                    except Exception:
-                        pass
-                    st.session_state["is_scanning"] = False
-                    st.warning("Scan cancellation requested.")
-                    st.rerun()
+        with monitor_placeholder.container():
+            st.markdown(monitor_html, unsafe_allow_html=True)
+            st.progress(progress_pct / 100.0, text=f"Step {active_stage}/4: {check_desc}")
 
         # 5. Update terminal output
         if log_lines:
@@ -940,12 +960,14 @@ if st.session_state.get("is_scanning") and st.session_state.get("active_scan_id"
         # 6. Check for completion or failure
         if curr_status == "completed":
             st.session_state["is_scanning"] = False
+            cancel_placeholder.empty()
             st.cache_data.clear()
             st.success("Security Assessment Finished successfully! Loading dashboard...")
             time.sleep(1.0)
             st.rerun()
             break
         elif curr_status in ("failed", "cancelled"):
+            cancel_placeholder.empty()
             monitor_placeholder.error(f"❌ Scan {curr_status.upper()}: {error_msg}")
             st.session_state["is_scanning"] = False
             break
@@ -1282,12 +1304,27 @@ if summary_data:
                 or sq in (f.get("description") or "").lower()
             ]
 
-        st.caption(f"Showing **{len(filtered_findings)}** of **{len(findings_data)}** evaluated security findings.")
+        total_matched = len(filtered_findings)
+        st.caption(f"Showing **{total_matched:,}** of **{len(findings_data):,}** evaluated security findings.")
 
         # Dual View Option: Cards View vs Grid View
         if filtered_findings:
             if view_mode == "Cards":
-                for idx, item in enumerate(filtered_findings[:60]):
+                PAGE_SIZE = 50
+                total_pages = max(1, (total_matched + PAGE_SIZE - 1) // PAGE_SIZE)
+                if total_pages > 1:
+                    p_col1, p_col2 = st.columns([1.5, 4])
+                    with p_col1:
+                        current_page = st.number_input("Page", min_value=1, max_value=total_pages, value=1, step=1, key="sb_findings_page")
+                    with p_col2:
+                        start_idx = (int(current_page) - 1) * PAGE_SIZE
+                        end_idx = min(start_idx + PAGE_SIZE, total_matched)
+                        st.markdown(f"<div style='padding-top: 28px; color: #94a3b8; font-size: 0.85rem;'>Displaying findings <strong>{start_idx + 1}–{end_idx}</strong> of <strong>{total_matched:,}</strong> (Page {current_page} of {total_pages})</div>", unsafe_allow_html=True)
+                else:
+                    start_idx = 0
+                    end_idx = min(PAGE_SIZE, total_matched)
+
+                for idx, item in enumerate(filtered_findings[start_idx:end_idx]):
                     sev = (item.get("severity") or "low").lower()
                     stat = (item.get("status") or "PASS").upper()
                     badge_class = f"badge-{sev}" if stat == "FAIL" else "badge-pass"
