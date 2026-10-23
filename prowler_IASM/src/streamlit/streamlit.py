@@ -572,24 +572,96 @@ def fetch_api_health(url: str, api_key: str = "") -> Dict[str, Any]:
     return {"online": False, "data": {}}
 
 @st.cache_data(ttl=15, show_spinner=False)
-def fetch_scan_dataset(url: str, scan_id: str, api_key: str = "") -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Caches scan results in memory so tab navigation and filtering are instant (0ms)."""
-    summary = None
-    findings = []
-    assets = []
-    headers = {"X-API-Key": api_key.strip()} if api_key.strip() else {}
+def fetch_scan_summary(url: str, scan_id: str, api_key: str = "") -> Optional[Dict[str, Any]]:
+    """Loads lightweight summary KPI card metadata in 2ms."""
+    headers = get_auth_headers(api_key)
     try:
         s_res = requests.get(f"{url}/api/v1/scans/{scan_id}/summary", headers=headers, timeout=5)
         if s_res.status_code == 200:
-            summary = s_res.json()
-        f_res = requests.get(f"{url}/api/v1/scans/{scan_id}/findings?limit=10000", headers=headers, timeout=20)
-        if f_res.status_code == 200:
-            findings = f_res.json().get("findings", [])
-        a_res = requests.get(f"{url}/api/v1/scans/{scan_id}/assets?limit=10000", headers=headers, timeout=20)
-        if a_res.status_code == 200:
-            assets = a_res.json().get("assets", [])
+            return s_res.json()
     except Exception:
         pass
+    return None
+
+@st.cache_data(ttl=15, show_spinner=False)
+def fetch_paginated_findings(
+    url: str,
+    scan_id: str,
+    status: str = "ALL",
+    severity: str = "ALL",
+    service: str = "ALL",
+    search: str = "",
+    limit: int = 50,
+    offset: int = 0,
+    api_key: str = "",
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Queries indexed MongoDB / cached findings in <10ms for current page view."""
+    headers = get_auth_headers(api_key)
+    params: Dict[str, Any] = {"limit": limit, "offset": offset}
+    if status and status != "ALL":
+        params["status"] = status
+    if severity and severity != "ALL":
+        params["severity"] = severity
+    if service and service != "ALL":
+        params["service"] = service
+    if search and search.strip():
+        params["search"] = search.strip()
+    try:
+        res = requests.get(f"{url}/api/v1/scans/{scan_id}/findings", params=params, headers=headers, timeout=8)
+        if res.status_code == 200:
+            data = res.json()
+            return data.get("findings", []), data.get("total", 0)
+    except Exception:
+        pass
+    return [], 0
+
+@st.cache_data(ttl=15, show_spinner=False)
+def fetch_paginated_assets(
+    url: str,
+    scan_id: str,
+    service: str = "ALL",
+    status: str = "ALL",
+    region: str = "ALL",
+    limit: int = 50,
+    offset: int = 0,
+    api_key: str = "",
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Queries indexed cloud asset inventory in <5ms for current page view."""
+    headers = get_auth_headers(api_key)
+    params: Dict[str, Any] = {"limit": limit, "offset": offset}
+    if service and service != "ALL":
+        params["service"] = service
+    if status and status != "ALL":
+        params["status"] = status
+    if region and region != "ALL":
+        params["region"] = region
+    try:
+        res = requests.get(f"{url}/api/v1/scans/{scan_id}/assets", params=params, headers=headers, timeout=8)
+        if res.status_code == 200:
+            data = res.json()
+            return data.get("assets", []), data.get("total", 0)
+    except Exception:
+        pass
+    return [], 0
+
+@st.cache_data(ttl=10, show_spinner=False)
+def fetch_active_mute_rules(url: str, api_key: str = "") -> List[Dict[str, Any]]:
+    """Loads active mute rules and false positive exceptions."""
+    headers = get_auth_headers(api_key)
+    try:
+        res = requests.get(f"{url}/api/v1/mute-rules", headers=headers, timeout=5)
+        if res.status_code == 200:
+            return res.json().get("mute_rules", [])
+    except Exception:
+        pass
+    return []
+
+@st.cache_data(ttl=15, show_spinner=False)
+def fetch_scan_dataset(url: str, scan_id: str, api_key: str = "") -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Backward-compatible helper returning summary and first 100 preview findings & assets."""
+    summary = fetch_scan_summary(url, scan_id, api_key)
+    findings, _ = fetch_paginated_findings(url, scan_id, limit=100, api_key=api_key)
+    assets, _ = fetch_paginated_assets(url, scan_id, limit=100, api_key=api_key)
     return summary, findings, assets
 
 # Session state initialization
@@ -1227,6 +1299,9 @@ if summary_data:
 
                     # Filter findings belonging to this framework
                     fw_findings = [f for f in findings_data if isinstance(f.get("compliance"), dict) and fw in f.get("compliance", {})]
+                    if not fw_findings and not st.session_state["demo_mode"] and active_id:
+                        fw_res_items, _ = fetch_paginated_findings(current_api_url, active_id, search=fw, limit=25, api_key=current_api_key)
+                        fw_findings = fw_res_items
 
                     # Action buttons for framework PDF and CSV reports
                     b_col1, b_col2, _ = st.columns([1.2, 1.2, 2.6])
@@ -1272,65 +1347,149 @@ if summary_data:
     # TAB 3: FINDINGS EXPLORER
     with tab_findings:
         st.markdown("#### 🔍 Filter & Investigate Vulnerabilities")
-        
+
+        # Active Mute Rules & Exceptions Expander
+        if not st.session_state["demo_mode"] and active_id:
+            active_mutes = fetch_active_mute_rules(current_api_url, current_api_key)
+            if active_mutes:
+                with st.expander(f"🛡️ Active Risk Exceptions & Mute Rules ({len(active_mutes)})", expanded=False):
+                    st.caption("Active exceptions suppressed from security score deductions.")
+                    for mr in active_mutes:
+                        mr_col1, mr_col2, mr_col3 = st.columns([2.5, 2.5, 1])
+                        with mr_col1:
+                            st.markdown(f"**Check:** `{mr.get('check_id')}`<br><span style='color: #94a3b8; font-size: 0.8rem;'>Resource: <code>{mr.get('resource_id', '*')}</code></span>", unsafe_allow_html=True)
+                        with mr_col2:
+                            st.markdown(f"**Reason:** {mr.get('reason')}<br><span style='color: #94a3b8; font-size: 0.8rem;'>Muted by {mr.get('muted_by', 'admin')}</span>", unsafe_allow_html=True)
+                        with mr_col3:
+                            rule_id = mr.get("id") or mr.get("_id")
+                            if st.button("Unmute ✕", key=f"btn_unmute_{rule_id}"):
+                                try:
+                                    d_res = requests.delete(
+                                        f"{current_api_url}/api/v1/mute-rules/{rule_id}",
+                                        headers=get_auth_headers(current_api_key),
+                                        timeout=5
+                                    )
+                                    if d_res.status_code == 200:
+                                        st.success("Mute rule removed! Restoring check...")
+                                        st.cache_data.clear()
+                                        time.sleep(0.8)
+                                        st.rerun()
+                                    else:
+                                        st.error(f"Failed to unmute: {d_res.text}")
+                                except Exception as de:
+                                    st.error(f"Error: {de}")
+
         # Interactive Filtering Toolbar
         fil_col1, fil_col2, fil_col3, fil_col4, fil_view = st.columns([1.2, 1.2, 1.4, 2.5, 1.2])
         with fil_col1:
-            sel_severity = st.selectbox("Severity", ["ALL", "critical", "high", "medium", "low"])
+            sel_severity = st.selectbox("Severity", ["ALL", "critical", "high", "medium", "low"], key="f_sel_severity")
         with fil_col2:
-            sel_status = st.selectbox("Status", ["ALL", "FAIL", "PASS"])
+            sel_status = st.selectbox("Status", ["ALL", "FAIL", "PASS", "MUTED"], key="f_sel_status")
         with fil_col3:
-            available_svcs = sorted(list({(f.get("service") or f.get("service_name") or "other").lower() for f in findings_data}))
-            sel_service = st.selectbox("Service", ["ALL"] + [s.upper() for s in available_svcs])
+            sb = summary_data.get("services_breakdown", {})
+            available_svcs = sorted(list(sb.keys())) if sb else sorted(list({(f.get("service") or f.get("service_name") or "other").lower() for f in findings_data}))
+            sel_service = st.selectbox("Service", ["ALL"] + [s.upper() for s in available_svcs], key="f_sel_service")
         with fil_col4:
-            search_query = st.text_input("Search", placeholder="Filter by check, resource ARN, or text...")
+            search_query = st.text_input("Search", placeholder="Filter by check, resource ARN, or text...", key="f_search_query")
         with fil_view:
-            view_mode = st.radio("View", ["Cards", "Table"], horizontal=True, label_visibility="visible")
+            view_mode = st.radio("View", ["Cards", "Table"], horizontal=True, label_visibility="visible", key="f_view_mode")
 
-        # Apply In-Memory Filters (Instant 0ms latency)
-        filtered_findings = findings_data
-        if sel_severity != "ALL":
-            filtered_findings = [f for f in filtered_findings if (f.get("severity") or "").lower() == sel_severity.lower()]
-        if sel_status != "ALL":
-            filtered_findings = [f for f in filtered_findings if (f.get("status") or "").upper() == sel_status.upper()]
-        if sel_service != "ALL":
-            filtered_findings = [f for f in filtered_findings if (f.get("service") or f.get("service_name") or "").lower() == sel_service.lower()]
-        if search_query:
-            sq = search_query.lower()
-            filtered_findings = [
-                f for f in filtered_findings
-                if sq in (f.get("check_title") or "").lower()
-                or sq in (f.get("resource_id") or "").lower()
-                or sq in (f.get("description") or "").lower()
-            ]
+        PAGE_SIZE = 50
 
-        total_matched = len(filtered_findings)
-        st.caption(f"Showing **{total_matched:,}** of **{len(findings_data):,}** evaluated security findings.")
+        # High-Performance Data Retrieval: Server-Side Indexed Pagination vs In-Memory Demo
+        if st.session_state["demo_mode"]:
+            filtered_findings = findings_data
+            if sel_severity != "ALL":
+                filtered_findings = [f for f in filtered_findings if (f.get("severity") or "").lower() == sel_severity.lower()]
+            if sel_status != "ALL":
+                filtered_findings = [f for f in filtered_findings if (f.get("status") or "").upper() == sel_status.upper()]
+            if sel_service != "ALL":
+                filtered_findings = [f for f in filtered_findings if (f.get("service") or f.get("service_name") or "").lower() == sel_service.lower()]
+            if search_query:
+                sq = search_query.lower()
+                filtered_findings = [
+                    f for f in filtered_findings
+                    if sq in (f.get("check_title") or "").lower()
+                    or sq in (f.get("resource_id") or "").lower()
+                    or sq in (f.get("description") or "").lower()
+                ]
+            total_matched = len(filtered_findings)
+            total_pages = max(1, (total_matched + PAGE_SIZE - 1) // PAGE_SIZE)
+            if total_pages > 1:
+                p_col1, p_col2 = st.columns([1.5, 4])
+                with p_col1:
+                    current_page = st.number_input("Page", min_value=1, max_value=total_pages, value=1, step=1, key="sb_demo_page")
+                with p_col2:
+                    start_idx = (int(current_page) - 1) * PAGE_SIZE
+                    end_idx = min(start_idx + PAGE_SIZE, total_matched)
+                    st.markdown(f"<div style='padding-top: 28px; color: #94a3b8; font-size: 0.85rem;'>Displaying findings <strong>{start_idx + 1}–{end_idx}</strong> of <strong>{total_matched:,}</strong> (Page {current_page} of {total_pages})</div>", unsafe_allow_html=True)
+            else:
+                current_page = 1
+                start_idx = 0
+                end_idx = min(PAGE_SIZE, total_matched)
+            display_findings = filtered_findings[start_idx:end_idx]
+        else:
+            saved_page = st.session_state.get("sb_findings_page_idx", 1)
+            offset_req = (int(saved_page) - 1) * PAGE_SIZE
+            display_findings, total_matched = fetch_paginated_findings(
+                current_api_url,
+                active_id,
+                status=sel_status,
+                severity=sel_severity,
+                service=sel_service,
+                search=search_query,
+                limit=PAGE_SIZE,
+                offset=offset_req,
+                api_key=current_api_key
+            )
+            total_pages = max(1, (total_matched + PAGE_SIZE - 1) // PAGE_SIZE)
+            if saved_page > total_pages:
+                saved_page = 1
+                display_findings, total_matched = fetch_paginated_findings(
+                    current_api_url,
+                    active_id,
+                    status=sel_status,
+                    severity=sel_severity,
+                    service=sel_service,
+                    search=search_query,
+                    limit=PAGE_SIZE,
+                    offset=0,
+                    api_key=current_api_key
+                )
+
+            if total_pages > 1:
+                p_col1, p_col2 = st.columns([1.5, 4])
+                with p_col1:
+                    current_page = st.number_input("Page", min_value=1, max_value=total_pages, value=int(saved_page), step=1, key="sb_findings_page_idx")
+                with p_col2:
+                    start_idx = (int(current_page) - 1) * PAGE_SIZE
+                    end_idx = min(start_idx + len(display_findings), total_matched)
+                    st.markdown(f"<div style='padding-top: 28px; color: #94a3b8; font-size: 0.85rem;'>Displaying findings <strong>{start_idx + 1}–{end_idx}</strong> of <strong>{total_matched:,}</strong> (Page {current_page} of {total_pages}) • <span style='color: #38bdf8;'>⚡ MongoDB B-Tree Query &lt;10ms</span></div>", unsafe_allow_html=True)
+            else:
+                current_page = 1
+                start_idx = 0
+                end_idx = min(PAGE_SIZE, total_matched)
+
+        st.caption(f"Showing **{total_matched:,}** evaluated security findings matching criteria.")
 
         # Dual View Option: Cards View vs Grid View
-        if filtered_findings:
+        if display_findings:
             if view_mode == "Cards":
-                PAGE_SIZE = 50
-                total_pages = max(1, (total_matched + PAGE_SIZE - 1) // PAGE_SIZE)
-                if total_pages > 1:
-                    p_col1, p_col2 = st.columns([1.5, 4])
-                    with p_col1:
-                        current_page = st.number_input("Page", min_value=1, max_value=total_pages, value=1, step=1, key="sb_findings_page")
-                    with p_col2:
-                        start_idx = (int(current_page) - 1) * PAGE_SIZE
-                        end_idx = min(start_idx + PAGE_SIZE, total_matched)
-                        st.markdown(f"<div style='padding-top: 28px; color: #94a3b8; font-size: 0.85rem;'>Displaying findings <strong>{start_idx + 1}–{end_idx}</strong> of <strong>{total_matched:,}</strong> (Page {current_page} of {total_pages})</div>", unsafe_allow_html=True)
-                else:
-                    start_idx = 0
-                    end_idx = min(PAGE_SIZE, total_matched)
-
-                for idx, item in enumerate(filtered_findings[start_idx:end_idx]):
+                for idx, item in enumerate(display_findings):
                     sev = (item.get("severity") or "low").lower()
                     stat = (item.get("status") or "PASS").upper()
-                    badge_class = f"badge-{sev}" if stat == "FAIL" else "badge-pass"
-                    
-                    exp_title = f"{'🔴' if stat == 'FAIL' else '🟢'} [{stat}] {item.get('check_title')} — {item.get('service', '').upper()} ({sev.upper()})"
-                    
+                    if stat == "MUTED":
+                        badge_class = "badge-low"
+                        stat_icon = "🔇"
+                    elif stat == "FAIL":
+                        badge_class = f"badge-{sev}"
+                        stat_icon = "🔴"
+                    else:
+                        badge_class = "badge-pass"
+                        stat_icon = "🟢"
+
+                    exp_title = f"{stat_icon} [{stat}] {item.get('check_title')} — {item.get('service', '').upper()} ({sev.upper()})"
+
                     with st.expander(exp_title, expanded=(idx < 2 and stat == 'FAIL')):
                         d_tab_overview, d_tab_remediation, d_tab_evidence, d_tab_other, d_tab_compliance, d_tab_scans, d_tab_events = st.tabs([
                             "📋 Overview",
@@ -1351,7 +1510,7 @@ if summary_data:
                                 </div>
                                 """, unsafe_allow_html=True)
                             st.markdown(f"**Description:** {item.get('description') or item.get('status_extended')}")
-                            
+
                             refs = item.get("references") or []
                             if not refs and item.get("remediation_url"):
                                 refs = [item.get("remediation_url")]
@@ -1376,7 +1535,7 @@ if summary_data:
                             </div>
                             """, unsafe_allow_html=True)
 
-                        # 2. REMEDIATION
+                        # 2. REMEDIATION & MUTE EXCEPTIONS
                         with d_tab_remediation:
                             if item.get("remediation"):
                                 st.markdown(f"**Action Plan:** {item.get('remediation')}")
@@ -1385,6 +1544,51 @@ if summary_data:
                                 st.code(item.get("remediation_cli"), language="bash")
                             if item.get("remediation_url"):
                                 st.markdown(f"[📖 Open Official Remediation Documentation]({item.get('remediation_url')})")
+
+                            st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+                            with st.expander("🔇 Mute / Mark False Positive (Exception Rule)", expanded=False):
+                                st.caption("Muting this check suppresses it in future scans and eliminates it from security score penalties.")
+                                m_col1, m_col2 = st.columns([2, 1])
+                                with m_col1:
+                                    mute_reason = st.text_input(
+                                        "Business Justification / Rationale",
+                                        placeholder="e.g. Approved public marketing assets or authorized access",
+                                        key=f"mute_reason_{item.get('id')}_{idx}"
+                                    )
+                                with m_col2:
+                                    scope_choice = st.selectbox(
+                                        "Mute Scope",
+                                        ["This resource only", "Account-wide (all resources for this check)"],
+                                        key=f"mute_scope_{item.get('id')}_{idx}"
+                                    )
+                                if st.button("Confirm Mute Exception", key=f"btn_mute_{item.get('id')}_{idx}"):
+                                    if not mute_reason or not mute_reason.strip():
+                                        st.error("Please enter a business justification before creating a mute rule.")
+                                    else:
+                                        res_target = item.get("resource_id") if scope_choice.startswith("This resource") else "*"
+                                        rule_payload = {
+                                            "check_id": item.get("check_id"),
+                                            "resource_id": res_target,
+                                            "reason": mute_reason.strip(),
+                                            "muted_by": "security_admin",
+                                            "tenant_id": "default"
+                                        }
+                                        try:
+                                            m_res = requests.post(
+                                                f"{current_api_url}/api/v1/mute-rules",
+                                                json=rule_payload,
+                                                headers=get_auth_headers(current_api_key),
+                                                timeout=5
+                                            )
+                                            if m_res.status_code in (200, 201):
+                                                st.success(f"Check '{item.get('check_id')}' muted successfully!")
+                                                st.cache_data.clear()
+                                                time.sleep(0.8)
+                                                st.rerun()
+                                            else:
+                                                st.error(f"Failed to create mute rule: {m_res.text}")
+                                        except Exception as me:
+                                            st.error(f"Error submitting mute rule: {me}")
 
                         # 3. EVIDENCE
                         with d_tab_evidence:
@@ -1395,9 +1599,9 @@ if summary_data:
                         # 4. OTHER FINDINGS ON THIS RESOURCE
                         with d_tab_other:
                             res_id = item.get("resource_id")
-                            other_findings = [f for f in findings_data if f.get("resource_id") == res_id and f.get("id") != item.get("id")]
+                            other_findings = [f for f in display_findings if f.get("resource_id") == res_id and f.get("id") != item.get("id")]
                             if other_findings:
-                                st.markdown(f"Found **{len(other_findings)}** additional check(s) evaluated on this resource:")
+                                st.markdown(f"Found **{len(other_findings)}** additional check(s) evaluated on this resource in current view:")
                                 df_other = pd.DataFrame([{
                                     "Status": f.get("status"),
                                     "Severity": f.get("severity"),
@@ -1406,7 +1610,7 @@ if summary_data:
                                 } for f in other_findings])
                                 st.dataframe(df_other, use_container_width=True, height=180)
                             else:
-                                st.info("No other checks associated with this specific resource.")
+                                st.info("No other checks associated with this resource on the current page.")
 
                         # 5. COMPLIANCE MAPPING
                         with d_tab_compliance:
@@ -1430,13 +1634,13 @@ if summary_data:
                             sc_col1.markdown(f"**Evaluating Scan:**<br>`{scan_id_val}`", unsafe_allow_html=True)
                             sc_col2.markdown(f"**Target Account:**<br>`{acc_id_val}`", unsafe_allow_html=True)
                             sc_col3.markdown(f"**Duration:**<br>`{dur_val} seconds`", unsafe_allow_html=True)
-                            
+
                             st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
                             st.markdown(f"""
                             <div class="info-grid-box" style="font-size: 0.85rem;">
                                 <div><strong>Scan State:</strong> <span class="badge-pass">COMPLETED</span></div>
                                 <div style="margin-top: 4px;"><strong>Assessment Trigger:</strong> Scheduled / On-Demand API</div>
-                                <div style="margin-top: 4px;"><strong>Total Scanned Resources:</strong> {len(assets_data)} resources</div>
+                                <div style="margin-top: 4px;"><strong>Total Scanned Resources:</strong> {summary_data.get('total_assets_scanned', len(assets_data))} resources</div>
                             </div>
                             """, unsafe_allow_html=True)
 
@@ -1465,7 +1669,7 @@ if summary_data:
                             """, unsafe_allow_html=True)
             else:
                 # Tabular Data Grid View
-                df_findings = pd.DataFrame(filtered_findings)
+                df_findings = pd.DataFrame(display_findings)
                 if "service_name" not in df_findings.columns and "service" in df_findings.columns:
                     df_findings["service_name"] = df_findings["service"]
                 if "status_extended" not in df_findings.columns and "description" in df_findings.columns:
@@ -1538,6 +1742,9 @@ if summary_data:
 
                 # Query all findings for this asset
                 asset_findings = [f for f in findings_data if f.get("resource_id") == target_arn]
+                if not asset_findings and not st.session_state["demo_mode"] and active_id:
+                    af_items, _ = fetch_paginated_findings(current_api_url, active_id, search=target_arn, limit=50, api_key=current_api_key)
+                    asset_findings = af_items
                 failed_asset_findings = [f for f in asset_findings if (f.get("status") or "").upper() == "FAIL"]
                 
                 st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)

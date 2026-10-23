@@ -1,4 +1,29 @@
 services:
+  # 0. High-Performance Document Database
+  mongo:
+    image: mongo:7.0
+    container_name: prowler-iasm-mongo
+    restart: unless-stopped
+    command: ["mongod", "--quiet"]
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGO_INITDB_DATABASE=prowler_iasm
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.adminCommand({ping: 1})'"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+        reservations:
+          memory: 128M
+
   # 1. FastAPI REST Microservice
   iasm-api:
     image: prowler-iasm:latest
@@ -7,6 +32,9 @@ services:
       dockerfile: Dockerfile
     container_name: prowler-iasm-api
     restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
     ports:
       - "3755:3755"  # FastAPI REST API & Swagger UI (/docs)
     env_file:
@@ -17,6 +45,8 @@ services:
       - MAX_CONCURRENT_SCANS=2
       - SCAN_OUTPUT_DIR=/app/scan_results
       - CORS_ORIGINS=*
+      - MONGO_URI=mongodb://mongo:27017
+      - MONGO_DB_NAME=prowler_iasm
     volumes:
       # Live development mount: code changes reflect immediately without rebuilding Docker
       - ./src:/app/src
@@ -45,6 +75,12 @@ services:
       - "8501:8501"  # Streamlit UI on http://localhost:8501
     environment:
       - API_BASE_URL=http://iasm-api:3755
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8501/_stcore/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     volumes:
       # Live development mount: Streamlit hot-reloads instantly on code changes
       - ./src:/app/src
@@ -56,3 +92,6 @@ services:
           memory: 1024M
         reservations:
           memory: 128M
+
+volumes:
+  mongo_data:

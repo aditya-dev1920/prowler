@@ -35,6 +35,8 @@ class TestHealthEndpoint:
         assert "max_concurrent_scans" in data
         assert "available_slots" in data
         assert "auth_enabled" in data
+        assert "database" in data
+        assert data["database"] in ("connected", "fallback_disk")
 
 
 class TestAuthentication:
@@ -545,4 +547,291 @@ class TestReportGenerators:
             # Tab 5 & 6: Scans & Events
             assert "scan_id" in f and f["scan_id"]
             assert "timestamp" in f
+
+
+class TestDatabaseLifecycle:
+    @pytest.mark.anyio
+    async def test_mongo_manager_graceful_fallback_when_offline(self, monkeypatch: pytest.MonkeyPatch):
+        from src.db.mongo import MongoManager
+        mgr = MongoManager()
+        monkeypatch.setenv("MONGO_URI", "mongodb://invalid-host-that-does-not-exist:27017")
+        monkeypatch.setenv("MONGO_TIMEOUT_MS", "50")
+        connected = await mgr.connect()
+        assert connected is False
+        assert mgr.is_connected is False
+        await mgr.disconnect()
+        assert mgr.is_connected is False
+
+    def test_mongo_manager_sync_fallback(self, monkeypatch: pytest.MonkeyPatch):
+        from src.db.mongo import MongoManager
+        mgr = MongoManager()
+        monkeypatch.setenv("MONGO_URI", "mongodb://invalid-host-that-does-not-exist:27017")
+        monkeypatch.setenv("MONGO_TIMEOUT_MS", "50")
+        sync_db = mgr.get_sync_database()
+        assert sync_db is None
+
+
+class TestDatabaseModelsAndRepositories:
+    def test_pydantic_schemas_instantiation(self):
+        from src.db.models import (
+            TenantModel,
+            CloudAccountModel,
+            ScanModel,
+            ScanKPIsModel,
+            FindingModel,
+            AssetModel,
+            ComplianceSummaryModel,
+            MuteRuleModel,
+        )
+
+        # 1. Tenant
+        tenant = TenantModel(
+            _id="tenant_01",
+            name="Nopal Cyber",
+            cloud_accounts=[
+                CloudAccountModel(
+                    account_id="037022143837",
+                    account_alias="Nopal Cyber",
+                    default_regions=["us-east-1", "ap-south-1"],
+                )
+            ],
+        )
+        assert tenant.id == "tenant_01"
+        assert tenant.name == "Nopal Cyber"
+        assert tenant.cloud_accounts[0].account_id == "037022143837"
+
+        # 2. Scan
+        scan = ScanModel(
+            _id="scan_001",
+            account_id="037022143837",
+            status="completed",
+            security_score=69.4,
+            kpis=ScanKPIsModel(total_findings=5713, passed=3955, failed=1744, critical=64),
+        )
+        assert scan.id == "scan_001"
+        assert scan.security_score == 69.4
+        assert scan.kpis.failed == 1744
+
+        # 3. Finding
+        finding = FindingModel(
+            scan_id="scan_001",
+            account_id="037022143837",
+            finding_uid="prowler-001",
+            check_id="iam_user_mfa_enabled",
+            check_title="Check if IAM users have MFA enabled",
+            service="iam",
+            severity="high",
+            status="FAIL",
+            resource_id="arn:aws:iam::037022143837:user/admin",
+        )
+        assert finding.status == "FAIL"
+        assert finding.severity == "high"
+
+        # 4. Asset
+        asset = AssetModel(
+            scan_id="scan_001",
+            account_id="037022143837",
+            resource_arn="arn:aws:iam::037022143837:user/admin",
+            service="iam",
+            status="vulnerable",
+            high_failures=1,
+        )
+        assert asset.status == "vulnerable"
+
+        # 5. Compliance Summary
+        comp = ComplianceSummaryModel(
+            scan_id="scan_001",
+            framework="cis_4.0.1_aws",
+            framework_name="CIS AWS 4.0.1",
+            score=62.7,
+            passed_controls=390,
+            failed_controls=227,
+            total_controls=617,
+        )
+        assert comp.score == 62.7
+
+        # 6. Mute Rule
+        mute = MuteRuleModel(
+            check_id="s3_bucket_public_access",
+            resource_id="arn:aws:s3:::static-marketing-assets",
+            reason="Public bucket for static site assets",
+            muted_by="security_admin",
+        )
+        assert mute.check_id == "s3_bucket_public_access"
+
+    def test_mute_rules_evaluation_logic(self):
+        from src.db.repository import MuteRuleRepository
+
+        active_mutes = [
+            {
+                "check_id": "s3_bucket_public_access",
+                "resource_id": "arn:aws:s3:::public-assets",
+            },
+            {
+                "check_id": "cloudtrail_s3_dataevents_write_enabled",
+                "resource_id": "*",  # Account-wide wildcard suppression
+            },
+        ]
+
+        # Match exact resource
+        f1 = {
+            "check_id": "s3_bucket_public_access",
+            "resource_id": "arn:aws:s3:::public-assets",
+        }
+        assert MuteRuleRepository.is_finding_muted(f1, active_mutes) is True
+
+        # Non-matching resource
+        f2 = {
+            "check_id": "s3_bucket_public_access",
+            "resource_id": "arn:aws:s3:::private-pii-data",
+        }
+        assert MuteRuleRepository.is_finding_muted(f2, active_mutes) is False
+
+        # Wildcard match on any resource
+        f3 = {
+            "check_id": "cloudtrail_s3_dataevents_write_enabled",
+            "resource_id": "arn:aws:s3:::any-bucket-name",
+        }
+        assert MuteRuleRepository.is_finding_muted(f3, active_mutes) is True
+
+    @pytest.mark.anyio
+    async def test_ensure_indexes_none_safe(self):
+        from src.db.indexes import ensure_indexes, ensure_indexes_sync
+
+        await ensure_indexes(None)
+        ensure_indexes_sync(None)
+
+    def test_compliance_summaries_endpoint(self, client: TestClient, mock_scan_artifacts: dict):
+        scan_id = mock_scan_artifacts["scan_id"]
+        res = client.get(f"/api/v1/scans/{scan_id}/compliance-summaries")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["scan_id"] == scan_id
+        assert "frameworks" in data
+        assert len(data["frameworks"]) >= 1
+        fw = data["frameworks"][0]
+        assert "framework" in fw
+        assert "score" in fw
+        assert "passed_controls" in fw
+        assert "failed_controls" in fw
+
+    def test_mute_rules_api_lifecycle(self, client: TestClient):
+        # 1. Create Mute Rule
+        payload = {
+            "check_id": "s3_bucket_public_access",
+            "resource_id": "arn:aws:s3:::static-marketing-assets",
+            "reason": "Public marketing bucket (Business exception)",
+            "muted_by": "alice@acme.com",
+            "tenant_id": "test_tenant",
+        }
+        res_create = client.post("/api/v1/mute-rules", json=payload)
+        assert res_create.status_code == 201
+        create_data = res_create.json()
+        assert create_data["status"] == "created"
+        rule = create_data["rule"]
+        assert rule["check_id"] == "s3_bucket_public_access"
+        assert rule["resource_id"] == "arn:aws:s3:::static-marketing-assets"
+        assert rule["reason"] == "Public marketing bucket (Business exception)"
+        rule_id = rule.get("id") or rule.get("_id")
+        assert rule_id is not None
+
+        # 2. List Mute Rules
+        res_list = client.get("/api/v1/mute-rules?tenant_id=test_tenant")
+        assert res_list.status_code == 200
+        list_data = res_list.json()
+        assert "mute_rules" in list_data
+
+        # 3. Delete Mute Rule (gracefully handles offline/mock)
+        res_del = client.delete(f"/api/v1/mute-rules/{rule_id}?tenant_id=test_tenant")
+        assert res_del.status_code in (200, 404)
+
+    def test_tenants_endpoint_and_repository(self, client: TestClient):
+        from src.db.repository import TenantRepository
+
+        # Test sync recording helper (none-safe when db offline)
+        res_sync = TenantRepository.record_cloud_account_scan_sync("123456789012", "Test-AWS")
+        assert isinstance(res_sync, bool)
+
+        # Test GET /api/v1/tenants
+        res = client.get("/api/v1/tenants")
+        assert res.status_code == 200
+        data = res.json()
+        assert "tenants" in data
+        assert data["total"] >= 1
+        assert data["tenants"][0]["_id"] == "default"
+
+        # Test GET /api/v1/tenants/default
+        res_def = client.get("/api/v1/tenants/default")
+        assert res_def.status_code == 200
+        assert res_def.json()["_id"] == "default"
+
+    def test_phase3_atomic_json_dump(self, tmp_path: Path):
+        from src.reports.post_processor import atomic_json_dump
+
+        target_file = tmp_path / "atomic_test.json"
+        test_payload = {"scan_id": "test_atomic_001", "total_findings": 5000}
+        atomic_json_dump(target_file, test_payload)
+
+        assert target_file.exists()
+        with open(target_file, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        assert loaded["scan_id"] == "test_atomic_001"
+        assert loaded["total_findings"] == 5000
+
+        # Verify no .tmp residue files remain
+        tmp_files = list(tmp_path.glob("*.tmp*"))
+        assert len(tmp_files) == 0
+
+    def test_phase3_chunked_bulk_insertion_none_safe(self):
+        from src.db.repository import FindingRepository, AssetRepository
+
+        # Offline / none-safe handling across large simulated batches
+        findings = [{"check_id": f"check_{i}", "severity": "high"} for i in range(2500)]
+        assets = [{"resource_arn": f"arn:aws:s3:::bucket_{i}", "service": "s3"} for i in range(2500)]
+
+        inserted_f = FindingRepository.bulk_insert_findings_sync("sim_scan", findings)
+        inserted_a = AssetRepository.bulk_insert_assets_sync("sim_scan", assets)
+
+        assert isinstance(inserted_f, int)
+        assert isinstance(inserted_a, int)
+
+    def test_phase3_ingestion_with_mute_rules_preserves_score(self, tmp_path: Path):
+        from src.reports.post_processor import process_scan_results
+        from unittest.mock import patch
+
+        # Prepare a mock CSV with 2 checks: 1 PASS, 1 FAIL that matches a mute rule
+        csv_file = tmp_path / "report.csv"
+        csv_content = (
+            "AUTH_METHOD;TIMESTAMP;ACCOUNT_ID;ACCOUNT_NAME;ACCOUNT_EMAIL;ACCOUNT_ARN;ACCOUNT_ORGANIZATION;"
+            "ACCOUNT_TAGS;FINDING_UID;PROVIDER;CHECK_ID;CHECK_TITLE;CHECK_TYPE;SERVICE_NAME;SUB_SERVICE_NAME;"
+            "STATUS;SEVERITY;REGION;RESOURCE_UID;RESOURCE_NAME;RESOURCE_DETAILS;RESOURCE_TAGS;DESCRIPTION;"
+            "STATUS_EXTENDED;RISK;RELATED_URL;REMEDIATION_RECOMMENDATION_TEXT;REMEDIATION_RECOMMENDATION_URL;"
+            "REMEDIATION_CODE_CLI;REMEDIATION_CODE_OTHER;CATEGORIES;DEPENDS_ON;RELATED_TO;NOTES;COMPLIANCE\n"
+            "env;2026-10-23T00:00:00Z;123456789012;prod;;;;;uid-1;aws;s3_bucket_default_encryption;S3 Encryption;check;s3;;PASS;high;us-east-1;arn:aws:s3:::secure-bucket;secure-bucket;;;Encrypted;;;;;;;;\n"
+            "env;2026-10-23T00:00:00Z;123456789012;prod;;;;;uid-2;aws;s3_bucket_public_access;S3 Public Access;check;s3;;FAIL;critical;us-east-1;arn:aws:s3:::marketing-assets;marketing-assets;;;Public;;;;;;;;\n"
+        )
+        csv_file.write_text(csv_content, encoding="utf-8")
+
+        # Mock active mute rules to suppress s3_bucket_public_access on marketing-assets
+        mock_mutes = [{
+            "check_id": "s3_bucket_public_access",
+            "resource_id": "arn:aws:s3:::marketing-assets",
+        }]
+
+        with patch("src.db.repository.MuteRuleRepository.get_active_mute_rules_sync", return_value=mock_mutes):
+            summary = process_scan_results(
+                target_dir=tmp_path,
+                scan_id="test_scan_mute_eval",
+                account_id="123456789012",
+                duration=10
+            )
+
+        assert summary["total_findings"] == 2
+        assert summary["passed"] == 1
+        assert summary["failed"] == 0
+        assert summary["muted"] == 1
+        # Crucial check: Security Score is 100.0% because the only FAIL check was muted as an accepted business exception!
+        assert summary["security_score"] == 100.0
+        assert "kpis" in summary
+        assert summary["kpis"]["muted"] == 1
 
